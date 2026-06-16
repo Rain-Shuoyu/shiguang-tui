@@ -113,48 +113,38 @@ class ShiGuangApp(App):
 
     BINDINGS = [
         Binding("ctrl+c", "quit", "退出", show=False),
-        Binding("0", "mode('home')", "0 首页", show=False),
-        # Number keys map directly to menu items in HomeView,
-        # NOT to mode names. The mapping is:
-        #   1 = stats (1st menu item)    2 = edit (2nd)    3 = browse (3rd)
-        # When NOT in home, these route to the same-numbered mode
-        # (1=edit, 2=browse, 3=stats) — same as before.
+        # Mode-switch and command keys. NONE are priority=True. The
+        # rationale: in the editor (TextArea focused), TextArea's
+        # check_consume_key returns True for these characters, so
+        # Textual's binding chain filter strips them from the App's
+        # binding map. The TextArea handles them as text input. In
+        # other modes (home, browse, stats) and in list focus
+        # (EditView focused), the App's binding fires and the
+        # corresponding action runs.
+        Binding("0", "go_home_or_back", "0 首页", show=False),
         Binding("1", "menu_pick(0)", "1 数据面板", show=False),
         Binding("2", "menu_pick(1)", "2 创作笔记", show=False),
         Binding("3", "menu_pick(2)", "3 洞察笔记", show=False),
-        # Arrow / vim keys:
-        #   - ↑ / ↓ / ← / → are NOT priority. They are yielded to
-        #     TextArea for native caret movement when the editor is
-        #     focused. When the LIST is focused (Static widget,
-        #     doesn't consume keys), Textual's binding chain filter
-        #     does NOT strip the App binding — so the App action
-        #     handler fires and moves the list cursor.
-        #   - For ← / → a double-tap (within ~350ms) inside the
-        #     editor switches focus to the list pane. The double-tap
-        #     detection lives in EditView._handle_arrow_in_editor,
-        #     invoked from _ShiGuangTextArea._on_key.
-        #   - j / k are NOT priority either — they're yielded to
-        #     TextArea as printable characters in the editor (so the
-        #     user CAN type "j" and "k" inside a diary entry), and
-        #     act as vim-style down/up shortcuts in the list focus
-        #     (where Static doesn't claim them).
+        # Arrow / vim keys: ↑ / ↓ / ← / → are non-priority, so they
+        # get filtered by TextArea when the editor is focused (caret
+        # moves). In list focus (EditView focused, doesn't consume
+        # keys), the App's binding fires and moves the list cursor.
         Binding("up",   "arrow_up",   show=False),
         Binding("down", "arrow_down", show=False),
         Binding("left",  "arrow_left",  show=False),
         Binding("right", "arrow_right", show=False),
         Binding("j", "arrow_down", show=False),
         Binding("k", "arrow_up",   show=False),
-        Binding("enter", "arrow_enter", show=False, priority=True),
+        Binding("enter", "arrow_enter", show=False),
         Binding("pageup",   "arrow_pageup",   show=False),
         Binding("pagedown", "arrow_pagedown", show=False),
         Binding("home", "arrow_home", show=False),
         Binding("end",  "arrow_end",  show=False),
-        Binding("escape", "go_home_or_back", show=False, priority=True),
-        Binding("c", "change_folder", show=False, priority=True),
-        Binding("ctrl+s", "save", show=False, priority=True),
-        # n/d — only meaningful in edit mode; handlers check current_mode.
-        Binding("n", "new_entry", show=False, priority=True),
-        Binding("d", "delete_entry", show=False, priority=True),
+        Binding("escape", "go_home_or_back", show=False),
+        Binding("c", "change_folder", show=False),
+        Binding("ctrl+s", "save", show=False),
+        Binding("n", "new_entry", show=False),
+        Binding("d", "delete_entry", show=False),
         Binding("?", "help", "? 帮助"),
         Binding("q", "quit", "q 退出", show=False),
     ]
@@ -319,7 +309,7 @@ class ShiGuangApp(App):
         elif self.current_mode == "edit":
             ev = self._find_edit_view()
             if ev:
-                ev.action_browse_up()
+                ev.action_cursor_up()
 
     def action_arrow_down(self) -> None:
         if self.current_mode == "home":
@@ -331,7 +321,7 @@ class ShiGuangApp(App):
         elif self.current_mode == "edit":
             ev = self._find_edit_view()
             if ev:
-                ev.action_browse_down()
+                ev.action_cursor_down()
 
     def action_arrow_left(self) -> None:
         if self.current_mode == "browse":
@@ -341,7 +331,7 @@ class ShiGuangApp(App):
         elif self.current_mode == "edit":
             ev = self._find_edit_view()
             if ev:
-                ev.action_browse_left()
+                ev.action_cursor_left()
 
     def action_arrow_right(self) -> None:
         if self.current_mode == "browse":
@@ -351,7 +341,7 @@ class ShiGuangApp(App):
         elif self.current_mode == "edit":
             ev = self._find_edit_view()
             if ev:
-                ev.action_browse_right()
+                ev.action_focus_editor()
 
     def action_arrow_enter(self) -> None:
         if self.current_mode == "home":
@@ -363,7 +353,7 @@ class ShiGuangApp(App):
         elif self.current_mode == "edit":
             ev = self._find_edit_view()
             if ev:
-                ev.action_browse_enter()
+                ev.action_focus_editor()
 
     def action_arrow_pageup(self) -> None:
         if self.current_mode == "browse":

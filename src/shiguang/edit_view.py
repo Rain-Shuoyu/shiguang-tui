@@ -11,19 +11,33 @@ Two-pane layout, vim-style keyboard navigation, no click / no Tab:
   │                │ <TextArea with full MD> │
   └────────────────┴─────────────────────────┘
 
-Focus regions, switched with ←/→:
-  - "list":    ↑/↓ or k/j move cursor (wrap-around). `n` create today's
-               entry, `d d` delete the highlighted entry.
-  - "editor":  TextArea is focused for typing. ← returns to list.
+Focus model — TWO independent focusable widgets, switched by blur/focus:
 
-Global keys (always work in edit mode):
-  - Ctrl+S         save the current entry to disk
-  - 0 / Esc        back to home
-  - c              change diary folder
+  list focus    EditView itself is focused. EditView's BINDINGS handle
+                command keys: n/d/c/0/?/q/Enter/Ctrl+S. TextArea is
+                blurred, so user can navigate the list with ↑/↓/j/k.
+                → Enter / double-tap → / double-tap ← ... etc.
+
+  editor focus  TextArea is focused. TextArea handles all keys as
+                normal text input. EditView's BINDINGS are inactive
+                because EditView is not the focused widget. User can
+                type any character including c, d, n, 0-3, q, ?.
+
+Focus switch rules:
+  list → editor:  single →, Enter
+  editor → list:  double-tap ←, double-tap →, 0/Esc, c (change folder)
+                  (these keys only fire in list focus, but 0/Esc
+                  also fire from the App level on Esc)
+
+Inside editor (TextArea focused), ↑/↓/←/→ are normal caret movement.
+
+Inside list (EditView focused), ↑/↓/j/k move the list cursor. The
+EditView's BINDINGS only fire when EditView is the focused widget.
 """
 
 from __future__ import annotations
 
+import time
 from collections import defaultdict
 from datetime import date as date_cls
 from pathlib import Path
@@ -31,78 +45,14 @@ from typing import Optional
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical
+from textual.containers import Container, Horizontal
+from textual.events import Key
 from textual.reactive import reactive
 from textual.widgets import Static, TextArea
 
 from . import frontmatter as fm
 from .diary import Entry, write_entry, available_filename
 from . import __version__
-
-
-# Keys that the App's priority bindings want to capture even when
-# TextArea is focused. We have to claim TextArea doesn't consume
-# these (otherwise Textual's screen._binding_chain filter will
-# remove the App's bindings for them).
-#
-# Note: arrows ("left", "right", "up", "down") are NOT in this set.
-# We yield them back to the TextArea for native caret movement.
-# Focus switching is done via double-tap ←/→ handled inside EditView.
-APP_CAPTURED_KEYS = frozenset({
-    "n", "d", "c", "0", "1", "2", "3", "q", "question_mark",
-    "enter", "escape", "ctrl+s",
-})
-
-
-class _ShiGuangTextArea(TextArea):
-    """TextArea that yields a handful of keys to App-level bindings
-    instead of inserting them as text.
-
-    Why: Textual's `screen._binding_chain` removes App-level bindings
-    for any key that the focused widget's `check_consume_key` claims to
-    consume. TextArea's default claims all printable characters. So
-    `n`/`d`/etc. are silently stripped from the App's binding chain when
-    the editor is focused.
-
-    Two overrides:
-    - `check_consume_key` returns False for the keys we want App to
-      handle. This keeps the App's priority bindings in the chain.
-    - `_on_key` short-circuits those same keys so the TextArea doesn't
-      insert the character into the text. The event propagates to the
-      App, which dispatches the priority binding.
-
-    Arrow keys (←/→) are handled differently: a single press is left
-    to TextArea for native caret movement, but a double-tap (within
-    ~350ms) is swallowed and triggers a focus switch to the list pane
-    via a callback on the parent EditView.
-    """
-
-    def check_consume_key(self, key: str, character=None) -> bool:  # type: ignore[override]
-        if key in APP_CAPTURED_KEYS:
-            return False
-        # Yield arrows to TextArea for native caret movement; double-tap
-        # detection is done in `_on_key`.
-        return super().check_consume_key(key, character)
-
-    async def _on_key(self, event) -> None:  # type: ignore[override]
-        if event.key in APP_CAPTURED_KEYS:
-            # Let the App-level priority binding fire. Don't insert.
-            return
-        # Double-tap detection for ← / →. Walk the DOM to find the
-        # parent EditView (mounted with id="edit-view"). On a double
-        # tap, swallow the event and let EditView switch focus.
-        if event.key in ("left", "right"):
-            try:
-                ev = self.screen.query_one("#edit-view")  # type: ignore[attr-defined]
-            except Exception:
-                ev = None
-            if ev is not None and getattr(ev, "_handle_arrow_in_editor", None):
-                consumed = ev._handle_arrow_in_editor(event.key)
-                if consumed:
-                    event.prevent_default()
-                    event.stop()
-                    return
-        await super()._on_key(event)
 
 
 # Reuse the project's amber palette
@@ -126,12 +76,29 @@ tags: []
 """
 
 
+class _ShiGuangTextArea(TextArea):
+    """Plain TextArea. No key overrides — all keys are processed as text
+    when this widget is focused. Caret movement (↑/↓/←/→) works natively.
+    """
+
+    # No check_consume_key override. No _on_key override. Just TextArea.
+    pass
+
+
 class EditView(Container):
-    """Two-pane edit view: list (left) + editor (right)."""
+    """Two-pane edit view: list (left) + editor (right).
+
+    Focusable: when this Container is the focused widget, the BINDINGS
+    below fire. When the TextArea inside is focused, the BINDINGS are
+    inactive and TextArea handles all key events as text input.
+    """
 
     DEFAULT_CSS = f"""
     EditView {{
         height: 1fr;
+    }}
+    EditView:focus {{
+        # leave default — no visual change for list focus
     }}
     #edit-header {{
         height: 3;
@@ -148,7 +115,7 @@ class EditView(Container):
         border: round {AMBER_DEEP};
         background: #14110F;
     }}
-    #edit-list.focused {{
+    EditView:focus #edit-list {{
         border: round {AMBER};
     }}
     #edit-editor {{
@@ -172,17 +139,19 @@ class EditView(Container):
     }}
     """
 
-    # App-level bindings (see app.py) route arrow keys / Ctrl+S here.
-    BINDINGS = [
-        # Empty: keys are routed by the App's action_arrow_* and
-        # action_save dispatchers so behavior is consistent across
-        # browse / edit.
-    ]
+    # No EditView BINDINGS. All command keys are at the App level
+    # (see app.py BINDINGS). They are non-priority, so they get
+    # filtered by TextArea's check_consume_key when the editor is
+    # focused (TextArea handles them as text input). In list focus
+    # (EditView focused, default check_consume_key returns False),
+    # the App's binding fires and the action handler routes to
+    # EditView's action_* methods.
+    BINDINGS = []
+
+    can_focus = True
 
     focus_region: reactive[str] = reactive("list")
     cursor: reactive[int] = reactive(0)
-    # dirty flag — true when the editor's text has been modified
-    # since the last save.
     dirty: reactive[bool] = reactive(False)
 
     def __init__(self, app) -> None:
@@ -190,26 +159,16 @@ class EditView(Container):
         self._app_ref = app
         self._rows: list[tuple[str, object]] = []
         self._flat: list[Entry] = []
-        # The path of the entry currently being edited. None when
-        # the editor is showing a brand-new (unsaved) entry.
         self._current_path: Optional[Path] = None
-        # The date the current entry represents (used when serialising).
         self._current_date: date_cls = date_cls.today()
-        # Track if a 'd' key was pressed; second 'd' within 1s triggers delete.
         self._d_pending: bool = False
-        # Track if 'n' is pending confirmation for overwriting today's entry.
+        self._d_pending_ts: float = 0.0
         self._n_pending: bool = False
         self._n_pending_ts: float = 0.0
-        self._N_PENDING_MS = 1500  # auto-clear after this window
-        # Double-tap ← / → state. Each stores the timestamp of the last
-        # single-tap; a second tap within `_DOUBLE_TAP_MS` switches focus.
+        self._N_PENDING_MS = 1500
+        self._DOUBLE_TAP_MS = 350
         self._last_left_ts: float = 0.0
         self._last_right_ts: float = 0.0
-        self._DOUBLE_TAP_MS = 350
-        # Snapshot of the text last loaded into / saved from the TextArea.
-        # Used by on_text_area_changed to distinguish real user edits from
-        # programmatic text replacement (which Textual posts as Changed
-        # *after* the assignment returns).
         self._last_saved_text: str = ""
 
     # ── Compose ─────────────────────────────────────────
@@ -229,18 +188,113 @@ class EditView(Container):
     def on_mount(self) -> None:
         self._populate_list()
         self._apply_focus_style()
-        # Open the first entry (or a fresh empty template if no entries)
+        # Load first entry into editor but DON'T focus the textarea —
+        # start in list focus so user can navigate the list immediately.
         self._load_into_editor()
+        # Default focus is the EditView itself (list focus)
+        self.focus()
+
+    def on_descendant_focus(self, descendant) -> None:
+        """When focus moves to a descendant (e.g. the TextArea), update
+        our focus_region accordingly. Triggered by:
+        - User pressing → or Enter in list focus (we focus the TextArea).
+        - User clicking on the TextArea.
+        """
+        if isinstance(descendant, _ShiGuangTextArea):
+            if self.focus_region != "editor":
+                self.focus_region = "editor"
+
+    def on_focus(self) -> None:
+        """When EditView itself gains focus (e.g. user pressed Esc
+        in editor, which moves focus to the next focusable widget),
+        switch to list focus.
+        """
+        if self.focus_region == "editor":
+            self.focus_region = "list"
+
+    def on_blur(self) -> None:
+        """When EditView itself loses focus (e.g. user navigates away
+        via Tab, opens a modal, etc.), don't change focus_region —
+        let the modal/state handle it. The actual focus change is
+        driven by descendant_focus events or explicit user action.
+        """
+        pass
+
+    # ── Focus / styling ─────────────────────────────────────────
+
+    def _apply_focus_style(self) -> None:
+        try:
+            editor_widget = self.query_one("#edit-editor", Container)
+        except Exception:
+            return
+        if self.focus_region == "list":
+            editor_widget.set_class(False, "focused")
+        else:
+            editor_widget.set_class(True, "focused")
+        try:
+            self.query_one("#edit-header", Static).update(self._render_header())
+        except Exception:
+            pass
+        self._render_list()
+
+    def _focus_textarea(self) -> None:
+        try:
+            ta = self.query_one("#edit-textarea", TextArea)
+            ta.focus()
+        except Exception:
+            pass
+
+    def _focus_self(self) -> None:
+        # EditView is a Container; setting focus on it makes its
+        # BINDINGS active and keys stop reaching the TextArea.
+        self.focus()
+
+    def watch_focus_region(self, _old, _new) -> None:
+        self._apply_focus_style()
+        if _new == "editor":
+            self._focus_textarea()
+        else:
+            self._focus_self()
+
+    def watch_cursor(self, _old, _new) -> None:
+        # Cursor moved to a different entry — clear any pending
+        # n/d confirmation (they were for the previous entry).
+        if _old != _new:
+            self._n_pending = False
+            self._n_pending_ts = 0.0
+            self._d_pending = False
+            self._d_pending_ts = 0.0
+        self._render_list()
+        if self.focus_region == "list" and self.dirty is False:
+            self._load_into_editor()
+
+    def watch_dirty(self, _old, _new) -> None:
+        self._render_status_widget()
 
     # ── Header / status ─────────────────────────────────────────
 
     def _render_header(self) -> str:
         n = len(self._app_ref.entries)
         focus_label = "列表" if self.focus_region == "list" else "编辑器"
+        if self.focus_region == "list":
+            hint = (
+                "↑/↓ j/k 选 · → Enter 进入编辑器 · "
+                "n 新建 · dd 删除 · Ctrl+S 保存 · c 改目录 · "
+                "? 帮助 · q 退出 · 0 返首页"
+            )
+        else:
+            # In editor focus, only Esc can exit (returns to list);
+            # from there press 0 to go home. Letter/digit keys
+            # must be free for typing.
+            hint = (
+                "编辑器内自由输入 · "
+                "Esc 回列表 · c 改目录 · "
+                "保存请先回列表再 Ctrl+S"
+            )
         return (
             f"[bold {AMBER}]{STAR} 创作笔记 · {n} 篇[/]   "
             f"[dim]焦点: [{AMBER}]{focus_label}[/][/]\n"
-            f"[dim]双击 ← / → 切焦点 · 列表 ↑↓ 选 · n 新建今日 · dd 删除 · Ctrl+S 保存 · 0/Esc 返首页 · c 改目录[/]"
+            f"[dim]{hint}[/]"
         )
 
     def _render_status(self) -> str:
@@ -279,7 +333,10 @@ class EditView(Container):
         return f"  [bold {AMBER_SOFT}]{e.date.strftime('%m-%d')}[/]  {title[:28]}{mood_badge}"
 
     def _render_list(self) -> str:
-        list_widget = self.query_one("#edit-list", Static)
+        try:
+            list_widget = self.query_one("#edit-list", Static)
+        except Exception:
+            return ""
         if not self._flat:
             list_widget.update(
                 "[dim]还没有日记。按 n 新建今天的。[/]"
@@ -292,11 +349,6 @@ class EditView(Container):
                 out.append(f"  [bold {AMBER_SOFT}]{payload}[/]")
             else:
                 e = payload  # type: ignore[assignment]
-                # In list focus, the cursor shows the bold ▸ + amber
-                # highlight. In editor focus, we still mark which
-                # entry is currently loaded — but with a dimmer
-                # indicator so the user can see the active file
-                # without confusing it with the focus cursor.
                 is_focus_cursor = (self.focus_region == "list" and flat_idx == self.cursor)
                 is_loaded = (self.focus_region == "editor" and flat_idx == self.cursor)
                 if is_focus_cursor:
@@ -304,9 +356,6 @@ class EditView(Container):
                         f"  [bold {AMBER}]▸  {e.date.strftime('%m-%d')}  {e.title or '无标题'}[/]"
                     )
                 elif is_loaded:
-                    # Editor focus: show the currently-loaded entry
-                    # with a dim ▸ so the user can see which file
-                    # the editor is showing.
                     out.append(
                         f"  [dim]▸  {e.date.strftime('%m-%d')}  {e.title or '无标题'}[/]"
                     )
@@ -324,6 +373,14 @@ class EditView(Container):
             return ""
 
     def _load_into_editor(self) -> None:
+        """Load the file for `self.cursor` into the TextArea.
+
+        Note: this does NOT clear `_n_pending` — the new-entry flow
+        may need `_load_into_editor` to show today's existing content
+        while the second-n confirm is still pending. Callers that
+        genuinely switch to a different entry should clear
+        `_n_pending` themselves (e.g. `watch_cursor` does this).
+        """
         ta = self.query_one("#edit-textarea", TextArea)
         if self._flat and 0 <= self.cursor < len(self._flat):
             entry = self._flat[self.cursor]
@@ -331,19 +388,12 @@ class EditView(Container):
             self._current_date = entry.date
             text = self._read_file_text(entry.path)
         else:
-            # No entries (or cursor out of range) — open new-entry template
             self._current_path = None
             self._current_date = date_cls.today()
             text = NEW_ENTRY_TEMPLATE.format(date=self._current_date.isoformat())
         ta.text = text
-        # Record the loaded text. Changed events fired *after* this
-        # assignment will compare equal to `_last_saved_text` and be
-        # ignored by on_text_area_changed.
         self._last_saved_text = text
         self.dirty = False
-        # Loading a different entry invalidates any pending-N state.
-        self._n_pending = False
-        self._n_pending_ts = 0.0
         self._render_status_widget()
 
     def _render_status_widget(self) -> None:
@@ -358,10 +408,7 @@ class EditView(Container):
         ta = self.query_one("#edit-textarea", TextArea)
         text = ta.text
         if self._current_path is None:
-            # Brand-new entry. Use the date in the file content if present,
-            # otherwise today.
             new_date = self._current_date
-            # Try to parse `date: YYYY-MM-DD` from the frontmatter
             parsed_fm, body = fm.parse(text)
             if parsed_fm.date:
                 try:
@@ -377,12 +424,10 @@ class EditView(Container):
             self._current_path.write_text(text, encoding="utf-8")
         self._last_saved_text = text
         self.dirty = False
-        # Re-scan so the new file shows up in the list
         self._app_ref.refresh_entries()
         self._populate_list()
         self._render_list()
         self._render_status_widget()
-        # Move cursor to the entry we just (re)saved
         if self._current_path is not None:
             for i, e in enumerate(self._flat):
                 if e.path == self._current_path:
@@ -391,14 +436,11 @@ class EditView(Container):
         self._render_list()
 
     def _new_today(self) -> None:
-        """Create a fresh empty entry for today and load into editor."""
         today = date_cls.today()
-        # If today's entry already exists, just load it and switch focus to editor
         existing = next(
             (e for e in self._app_ref.entries if e.date == today), None
         )
         if existing:
-            # Move cursor to existing today entry, then focus editor
             for i, e in enumerate(self._flat):
                 if e.path == existing.path:
                     self.cursor = i
@@ -408,15 +450,11 @@ class EditView(Container):
             self.focus_region = "editor"
             self._focus_textarea()
             return
-        # Otherwise create the template
         self._current_path = None
         self._current_date = today
         ta = self.query_one("#edit-textarea", TextArea)
         text = NEW_ENTRY_TEMPLATE.format(date=today.isoformat())
         ta.text = text
-        # Brand-new entry: starting state is the template, which counts
-        # as "saved" relative to the (non-existent) file — but mark
-        # dirty so the user is prompted to save the new entry.
         self._last_saved_text = text
         self.dirty = True
         self._render_status_widget()
@@ -432,14 +470,9 @@ class EditView(Container):
         entry = self._flat[self.cursor]
         path = entry.path
         try:
-            # Soft-delete: move to ~/.shiguang-trash (or similar) for
-            # safety. For simplicity, just delete the file — diary.md
-            # files are user-generated content and the user explicitly
-            # triggered the delete via 'dd'.
             path.unlink()
         except OSError:
             return
-        # Re-scan and adjust cursor
         self._app_ref.refresh_entries()
         if self._flat:
             self.cursor = min(self.cursor, len(self._flat) - 1)
@@ -450,158 +483,22 @@ class EditView(Container):
         self._render_list()
         self._render_status_widget()
 
-    # ── Focus / styling ─────────────────────────────────────────
-
-    def _focus_textarea(self) -> None:
-        try:
-            ta = self.query_one("#edit-textarea", TextArea)
-            ta.focus()
-        except Exception:
-            pass
-
-    def _apply_focus_style(self) -> None:
-        try:
-            list_widget = self.query_one("#edit-list", Static)
-            editor_widget = self.query_one("#edit-editor", Container)
-        except Exception:
-            return
-        if self.focus_region == "list":
-            list_widget.set_class(True, "focused")
-            editor_widget.set_class(False, "focused")
-        else:
-            list_widget.set_class(False, "focused")
-            editor_widget.set_class(True, "focused")
-        try:
-            self.query_one("#edit-header", Static).update(self._render_header())
-        except Exception:
-            pass
-        self._render_list()
-
-    def watch_focus_region(self, _old, _new) -> None:
-        self._apply_focus_style()
-        if _new == "editor":
-            self._focus_textarea()
-
-    def watch_cursor(self, _old, _new) -> None:
-        self._render_list()
-        # Reload editor content when cursor changes (only if list is focused,
-        # to avoid stomping on the user's in-progress edits).
-        if self.focus_region == "list" and self.dirty is False:
-            self._load_into_editor()
-
-    def watch_dirty(self, _old, _new) -> None:
-        self._render_status_widget()
-
-    # ── Key handling (called by App-level BINDINGS) ──────────────────
-
-    def action_browse_up(self) -> None:
-        if self.focus_region == "list":
-            if self._flat:
-                self.cursor = (self.cursor - 1) % len(self._flat)
-        else:
-            # In editor: TextArea handles up/down natively (we removed
-            # these from APP_CAPTURED_KEYS). Just re-focus the textarea
-            # so the user sees the caret move.
-            ta = self.query_one("#edit-textarea", TextArea)
-            ta.focus()
-
-    def action_browse_down(self) -> None:
-        if self.focus_region == "list":
-            if self._flat:
-                self.cursor = (self.cursor + 1) % len(self._flat)
-        else:
-            ta = self.query_one("#edit-textarea", TextArea)
-            ta.focus()
-
-    def action_browse_left(self) -> None:
-        # In list focus, ← is a no-op (already at the leftmost pane).
-        # In editor focus, ← is handled inside _ShiGuangTextArea
-        # (double-tap detection + caret movement). This method should
-        # not be reached in editor focus because the App-level
-        # binding is filtered out by _ShiGuangTextArea.check_consume_key.
-        pass
-
-    def action_browse_right(self) -> None:
-        # In list focus, → switches to the editor pane.
-        if self.focus_region == "list" and self._flat:
-            self.focus_region = "editor"
-        # In editor focus, → is handled inside _ShiGuangTextArea
-        # (double-tap detection + caret movement).
-
-    def _handle_arrow_in_editor(self, key: str) -> bool:
-        """Double-tap detection for ← / → when the editor is focused.
-
-        Called by `_ShiGuangTextArea._on_key` *before* TextArea's default
-        handler runs. Returns True if the event was consumed (i.e. a
-        double-tap → focus switch to the list); False if the event
-        should fall through to TextArea for normal caret movement.
-
-        Both `←` and `→` are double-tap-switch-to-list, symmetric. The
-        first tap records the timestamp and returns False (TextArea
-        moves the caret). The second tap within `_DOUBLE_TAP_MS`
-        switches focus to the list and returns True.
-        """
-        import time
-        now = time.monotonic()
-        if key == "left":
-            if (now - self._last_left_ts) * 1000 < self._DOUBLE_TAP_MS:
-                self._last_left_ts = 0.0
-                self.focus_region = "list"
-                return True
-            self._last_left_ts = now
-            return False
-        if key == "right":
-            if (now - self._last_right_ts) * 1000 < self._DOUBLE_TAP_MS:
-                self._last_right_ts = 0.0
-                self.focus_region = "list"
-                return True
-            self._last_right_ts = now
-            return False
-        return False
-
-    def action_browse_enter(self) -> None:
-        if self.focus_region == "list" and self._flat:
-            self.focus_region = "editor"
-
-    def action_browse_pageup(self) -> None:
-        # editor handles its own page-up natively; nothing to do
-        pass
-
-    def action_browse_pagedown(self) -> None:
-        pass
-
-    def action_browse_home(self) -> None:
-        pass
-
-    def action_browse_end(self) -> None:
-        pass
-
-    def action_save(self) -> None:
-        self._save_current()
+    # ── Actions invoked by EditView BINDINGS (list focus only) ─────────
 
     def action_new_entry(self) -> None:
         """`n` — create / jump to today's entry.
 
-        Behaviour:
-        1. Today's entry doesn't exist → create template, jump to editor.
-        2. Today's entry exists, no recent pending-N → move cursor to
-           today, load its content into the editor pane (no focus
-           switch), show a clear status-bar prompt: "今日已有 [N] 覆盖
-           [→] 编辑 [Esc] 取消".
-        3. Today's entry exists, second `n` within 1.5s → wipe editor
-           to fresh template, mark dirty, jump to editor focus.
-
-        Works from either focus region.
+        Called from EditView BINDINGS, so EditView must be focused
+        (i.e. list focus). Today's entry handling:
+        - Doesn't exist → create template, jump to editor.
+        - Exists, first n → move cursor to today, show choice hint,
+          stay in list focus.
+        - Exists, second n within 1.5s → wipe to template, jump to
+          editor.
         """
-        import time
         now = time.monotonic()
-        # Auto-clear stale pending flag
         if self._n_pending and (now - self._n_pending_ts) * 1000 > self._N_PENDING_MS:
             self._n_pending = False
-        # If user pressed n from editor focus, jump to list first so
-        # they see the cursor land on today.
-        if self.focus_region == "editor":
-            self.focus_region = "list"
         today = date_cls.today()
         existing = next(
             (e for e in self._app_ref.entries if e.date == today), None
@@ -618,9 +515,6 @@ class EditView(Container):
                 break
         self._render_list()
         if not self._n_pending:
-            # First press: load today's content into editor, show
-            # clear choice hint. Stay in list focus so user sees the
-            # ▸ cursor on today.
             self._n_pending = True
             self._n_pending_ts = now
             self._load_into_editor()
@@ -632,7 +526,7 @@ class EditView(Container):
             except Exception:
                 pass
             return
-        # Second press within window: confirm overwrite with template.
+        # Second press within window: overwrite.
         self._n_pending = False
         self._n_pending_ts = 0.0
         self._current_path = None
@@ -648,16 +542,16 @@ class EditView(Container):
         self._focus_textarea()
 
     def action_delete_entry(self) -> None:
-        # Two-step: 'd' sets a pending flag. A second 'd' within ~1s
-        # actually deletes. Works from either focus region.
-        if self.focus_region == "editor":
-            self.focus_region = "list"
+        """`d` — two-step delete (works in list focus)."""
+        now = time.monotonic()
+        if self._d_pending and (now - self._d_pending_ts) * 1000 > 1000:
+            self._d_pending = False
         if self._d_pending:
             self._d_pending = False
             self._delete_current()
         else:
             self._d_pending = True
-            # Show a transient hint in the status line
+            self._d_pending_ts = now
             try:
                 self.query_one("#editor-status", Static).update(
                     "  [bold #C97B4F]再按一次 d 确认删除[/]"
@@ -665,18 +559,74 @@ class EditView(Container):
             except Exception:
                 pass
 
+    def action_change_folder(self) -> None:
+        """`c` — open change-folder modal. List focus only."""
+        # Push the screen on the App, not on EditView.
+        self._app_ref.action_change_folder()
+
+    def action_go_home(self) -> None:
+        """`0` — return to home. List focus only.
+
+        Also the user can press Esc from the App level; both routes
+        land on action_go_home_or_back which goes home if no modal
+        is on top.
+        """
+        # Clear pending-N/D state to avoid stale confirmations later.
+        self._n_pending = False
+        self._n_pending_ts = 0.0
+        self._d_pending = False
+        self._d_pending_ts = 0.0
+        if self._app_ref.current_mode != "home":
+            self._app_ref.current_mode = "home"
+            self._app_ref.render_mode()
+
+    def action_help(self) -> None:
+        self._app_ref.action_help()
+
+    def action_quit(self) -> None:
+        self._app_ref.exit()
+
+    def action_save(self) -> None:
+        """Ctrl+S — save current entry. List focus only."""
+        self._save_current()
+
+    def action_focus_editor(self) -> None:
+        """→ or Enter — switch to editor focus.
+
+        In list focus, single → or Enter should switch to editor.
+        Note: there's no double-tap detection here — single press is
+        the explicit gesture. (Double-tap detection was for ←/→ in
+        editor focus, which we no longer need because ↑/↓/←/→
+        are always passed through to the focused widget.)
+        """
+        if self.focus_region == "list" and self._flat:
+            self.focus_region = "editor"
+
+    # ── List navigation (works in list focus only) ─────────
+
+    def action_cursor_up(self) -> None:
+        if self._flat:
+            self.cursor = (self.cursor - 1) % len(self._flat)
+
+    def action_cursor_down(self) -> None:
+        if self._flat:
+            self.cursor = (self.cursor + 1) % len(self._flat)
+
+    def action_cursor_left(self) -> None:
+        # No-op in list focus
+        pass
+
+    def action_cursor_right(self) -> None:
+        # No-op; use action_focus_editor
+        pass
+
     # ── TextArea change tracking ──────────────────────────────
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
-        # Textual posts Changed events asynchronously, sometimes after
-        # _load_into_editor (or _save_current) has returned. So we can't
-        # gate on a "loading" flag — we compare to the last text we
-        # consider "saved" and treat equal content as a no-op.
         current_text = event.text_area.text
         if current_text == self._last_saved_text:
             return
         if not self.dirty:
             self.dirty = True
         else:
-            # Already dirty — still re-render the status badge
             self._render_status_widget()
