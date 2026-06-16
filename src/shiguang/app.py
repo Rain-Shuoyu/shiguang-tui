@@ -1118,7 +1118,7 @@ def _strip_markup(text: str) -> str:
 
 # ── 首页 Widget ──────────────────────────────────────
 
-class HomeView(Container):
+class HomeView(Vertical):
     """The centered home screen: giant 'A' logo + glow halo + 3
     menu lines.
 
@@ -1141,28 +1141,33 @@ class HomeView(Container):
     }}
     #logo-block {{
         align: center middle;
+        content-align: center middle;
         width: 100%;
         height: 9;
     }}
     #title {{
         align: center middle;
+        content-align: center middle;
         width: 100%;
         height: 1;
         margin-top: 1;
     }}
     #subtitle {{
         align: center middle;
+        content-align: center middle;
         width: 100%;
         height: 1;
         margin-bottom: 1;
     }}
     #menu {{
         align: center middle;
-        width: 40;
+        content-align: center middle;
+        width: 100%;
         height: auto;
     }}
     #footer-hint {{
         align: center middle;
+        content-align: center middle;
         width: 100%;
         height: 1;
         margin-top: 2;
