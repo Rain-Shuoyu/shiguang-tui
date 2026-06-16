@@ -241,14 +241,15 @@ class ShiGuangApp(App):
         pills = []
         for k in self.MY_MODES:
             i = self.MY_MODES.index(k)
-            pill = f"[{i}] {self.MODE_LABELS[k]}"
             if k == m:
-                pill = f"[reverse][black on {AMBER}] {glyph} {self.MODE_LABELS[k]} [/]"
+                # Active mode: bright amber text only — no reverse / block
+                pill = f"[bold {AMBER}]{glyph} {self.MODE_LABELS[k]}[/]"
             else:
-                pill = f"[dim][[{i}] {self.MODE_LABELS[k]}][/]"
+                # Inactive: soft amber, dim
+                pill = f"[{AMBER_SOFT}][[{i}] {self.MODE_LABELS[k]}][/]"
             pills.append(pill)
-        active = next(p for p in pills if "[reverse]" in p)
-        others = " ".join(p for p in pills if "[reverse]" not in p)
+        active = next(p for p in pills if f"bold {AMBER}" in p)
+        others = " ".join(p for p in pills if f"bold {AMBER}" not in p)
         indicator.update(
             f" 拾光  {ARROW}  {active}  {others}    "
             f"[dim]{self.folder.name}{ARROW} {now}[/]"
@@ -634,12 +635,13 @@ class HomeView(Container):
             if i == self.selected:
                 # Selected: bright amber + cursor
                 lines.append(
-                    f"  [reverse] [black on {AMBER}]   ▸  {key}  {label}    [/]"
+                    f"  [bold {AMBER}]▸  {key}  {label}[/]"
                 )
             else:
-                # Not selected: dimmer
+                # Not selected: soft amber (one shade dimmer, but still
+                # in the same family — no contrast-block artifact).
                 lines.append(
-                    f"     [dim]   {key}  {label}    [/]"
+                    f"     [bold {AMBER_SOFT}]   {key}  {label}[/]"
                 )
         return "\n".join(lines)
 
