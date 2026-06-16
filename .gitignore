@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Build / dist
+build/
+dist/
+*.dmg
+*.app
+
+# Editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# venvs
+venv/
+.venv/
+env/
+
+# Test coverage
+.coverage
+htmlcov/
+
+# State / local-only
+state.local.json

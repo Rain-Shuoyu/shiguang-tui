@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shiguang"
+version = "0.1.0"
+description = "拾光 · AfterGlow — 自我探索 / 写作疗愈 / AI-powered reflective journal (TUI)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Rain-Shuoyu" }]
+dependencies = [
+    "textual>=0.40",
+    "httpx>=0.25",
+    "pydantic>=2.0",
+    "rich>=13.0",
+]
+
+[project.scripts]
+shiguang = "shiguang.__main__:main"
+shi = "shiguang.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/Rain-Shuoyu/AfterGlow-AI-Powered-Reflective-Journal-Manager"
+
+[tool.setuptools.packages.find]
+where = ["src"]
