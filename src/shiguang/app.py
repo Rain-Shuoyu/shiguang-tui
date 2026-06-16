@@ -305,7 +305,7 @@ class ShiGuangApp(App):
         elif self.current_mode == "browse":
             bv = self._find_browse_view()
             if bv:
-                bv.action_browse_up()
+                bv.action_cursor_up()
         elif self.current_mode == "edit":
             ev = self._find_edit_view()
             if ev:
@@ -317,7 +317,7 @@ class ShiGuangApp(App):
         elif self.current_mode == "browse":
             bv = self._find_browse_view()
             if bv:
-                bv.action_browse_down()
+                bv.action_cursor_down()
         elif self.current_mode == "edit":
             ev = self._find_edit_view()
             if ev:
@@ -327,17 +327,16 @@ class ShiGuangApp(App):
         if self.current_mode == "browse":
             bv = self._find_browse_view()
             if bv:
-                bv.action_browse_left()
+                bv.action_focus_list()
         elif self.current_mode == "edit":
             ev = self._find_edit_view()
             if ev:
                 ev.action_cursor_left()
 
     def action_arrow_right(self) -> None:
+        # In browse, → no longer focuses the preview (use Enter instead).
         if self.current_mode == "browse":
-            bv = self._find_browse_view()
-            if bv:
-                bv.action_browse_right()
+            return
         elif self.current_mode == "edit":
             ev = self._find_edit_view()
             if ev:
@@ -349,35 +348,26 @@ class ShiGuangApp(App):
         elif self.current_mode == "browse":
             bv = self._find_browse_view()
             if bv:
-                bv.action_browse_enter()
+                bv.action_focus_preview()
         elif self.current_mode == "edit":
             ev = self._find_edit_view()
             if ev:
                 ev.action_focus_editor()
 
     def action_arrow_pageup(self) -> None:
-        if self.current_mode == "browse":
-            bv = self._find_browse_view()
-            if bv:
-                bv.action_browse_pageup()
+        # Only meaningful in browse preview (where App BINDINGS are
+        # filtered and TextArea handles PageUp natively); this branch
+        # is essentially a no-op since TextArea owns the key.
+        return
 
     def action_arrow_pagedown(self) -> None:
-        if self.current_mode == "browse":
-            bv = self._find_browse_view()
-            if bv:
-                bv.action_browse_pagedown()
+        return
 
     def action_arrow_home(self) -> None:
-        if self.current_mode == "browse":
-            bv = self._find_browse_view()
-            if bv:
-                bv.action_browse_home()
+        return
 
     def action_arrow_end(self) -> None:
-        if self.current_mode == "browse":
-            bv = self._find_browse_view()
-            if bv:
-                bv.action_browse_end()
+        return
 
     # ── 顶部 status bar ──────────────────────────────────────
 
@@ -387,21 +377,10 @@ class ShiGuangApp(App):
         label = self.MODE_LABELS[m]
         glyph = self.MODE_GLYPH[m]
         now = datetime.now().strftime("%H:%M")
-        # pills: 0 首页 · 1 编辑 · 2 记录 · 3 报表 · ? 帮助
-        pills = []
-        for k in self.MY_MODES:
-            i = self.MY_MODES.index(k)
-            if k == m:
-                # Active mode: bright amber text only — no reverse / block
-                pill = f"[bold {AMBER}]{glyph} {self.MODE_LABELS[k]}[/]"
-            else:
-                # Inactive: soft amber, dim
-                pill = f"[{AMBER_SOFT}][[{i}] {self.MODE_LABELS[k]}][/]"
-            pills.append(pill)
-        active = next(p for p in pills if f"bold {AMBER}" in p)
-        others = " ".join(p for p in pills if f"bold {AMBER}" not in p)
+        # Minimal top line: just the current mode + folder + time.
+        # (No more mode pills — user requested they be removed.)
         indicator.update(
-            f" 拾光  {ARROW}  {active}  {others}    "
+            f"  [bold {AMBER}]{glyph} {label}[/]   "
             f"[dim]{self.folder.name}{ARROW} {now}[/]"
         )
 
@@ -767,22 +746,54 @@ class ChangeFolderScreen(ModalScreen):
 
 # ── 记录 (Browse) 视图 — ListView + Markdown 预览 ──────────────────────
 
+class _BrowsePreviewTextArea(TextArea):
+    """A read-only TextArea whose Esc key returns focus to the
+    parent BrowseView (instead of calling screen.focus_next, which
+    doesn't reliably land on the grandparent Container in this layout).
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.read_only = True
+
+    async def _on_key(self, event) -> None:
+        if event.key == "escape":
+            event.stop()
+            event.prevent_default()
+            # Walk up to find the BrowseView and call its action.
+            node = self.parent
+            while node is not None and not isinstance(node, BrowseView):
+                node = node.parent
+            if node is not None:
+                node.action_focus_list()
+            return
+        # Defer to the standard TextArea handler for everything else.
+        await super()._on_key(event)
+
+
 class BrowseView(Container):
-    """The '记录' (browse) mode: a left-side list of entries grouped by
-    month, and a right-side preview pane showing the selected entry's
-    rendered markdown.
+    """The '洞察 / 记录' (browse) mode: a left-side list of entries
+    grouped by month, and a right-side preview pane showing the
+    selected entry's rendered markdown.
 
     Pure keyboard, vim-style. No mouse / Tab / click.
 
-    Two focus regions, switched with ←/→:
-      - "list"   (default on mount) — ↑/↓ or k/j move the cursor, Enter
-                  re-renders the preview for the highlighted row.
-      - "preview" — ↑/↓ or k/j scroll the preview pane; ← returns to
-                    the list.
+    Two focus regions, switched with Enter / Esc:
+      - "list"   (default on mount) — ↑/↓ or k/j move the cursor.
+                  Enter focuses the preview pane.
+      - "preview" — ↑/↓/←/→ (or k/j/h/l) move the caret in the
+                    read-only TextArea; the pane scrolls automatically
+                    to keep the caret visible. Esc returns focus to
+                    the list (handled by `_BrowsePreviewTextArea`'s
+                    custom _on_key, which calls the BrowseView's
+                    action_focus_list — TextArea's built-in Esc uses
+                    focus_next which doesn't reliably land on the
+                    parent Container).
 
     Global keys (always available in browse mode):
-      - 0 / Esc: back to home
-      - c:       change diary folder
+      - 0: back to home
+      - c: change diary folder
+      - ? / q: help / quit
     """
 
     DEFAULT_CSS = f"""
@@ -807,24 +818,22 @@ class BrowseView(Container):
     #browse-list.focused {{
         border: round {AMBER};
     }}
-    #browse-preview {{
+    #preview-textarea {{
         width: 1fr;
         height: 1fr;
         border: round {AMBER_DEEP};
         background: #14110F;
     }}
-    #browse-preview.focused {{
+    #preview-textarea:focus {{
         border: round {AMBER};
-    }}
-    #preview-scroll {{
-        height: 1fr;
     }}
     """
 
+    # Focusable so the Container itself can take focus in list mode.
+    can_focus = True
+
     BINDINGS = [
-        # BrowseView keys are routed via the App-level BINDINGS
-        # (action_arrow_*), because Container is not focusable by
-        # default. Keeping this empty prevents stale duplicates.
+        # All command keys live on the App; BrowseView has none.
     ]
 
     # Two focus regions. Reactive so we can watch changes and re-style
@@ -846,28 +855,75 @@ class BrowseView(Container):
         yield Static(self._render_header(), id="browse-header")
         with Horizontal(id="browse-body"):
             yield Static("", id="browse-list")
-            with VerticalScroll(id="preview-scroll"):
-                yield Static(self._render_empty_preview(), id="browse-preview")
+            yield _BrowsePreviewTextArea(
+                "",
+                id="preview-textarea",
+                soft_wrap=True,
+            )
 
     def on_mount(self) -> None:
         self._populate_list()
         # Style initial focus
         self._apply_focus_style()
+        # Make sure the list is the initially focused region
+        self.focus()
+
+    # ── Focus routing — mirrors EditView's pattern ──────────────
+
+    def _focus_preview(self) -> None:
+        """Move focus into the read-only preview TextArea."""
+        try:
+            ta = self.query_one("#preview-textarea", TextArea)
+            ta.focus()
+        except Exception:
+            pass
+
+    def watch_focus_region(self, _old, _new) -> None:
+        """React to focus_region changes by re-styling borders and
+        actually moving the focus."""
+        self._apply_focus_style()
+        if _new == "preview":
+            self._focus_preview()
+        else:
+            # When switching back to list, focus self (the Container)
+            # — but only if we're not already in the middle of a
+            # focus change driven by Textual's own focus machinery.
+            if self.app.focused is not self:
+                self.focus()
+
+    def on_focus(self) -> None:
+        """When BrowseView itself gains focus (e.g. user pressed Esc
+        in the preview, which moves focus via screen.focus_next()),
+        switch to list focus."""
+        if self.focus_region == "preview":
+            self.focus_region = "list"
+
+    def on_descendant_focus(self, descendant) -> None:
+        """When the TextArea descendant gains focus, switch to
+        preview focus."""
+        if isinstance(descendant, _BrowsePreviewTextArea):
+            if self.focus_region != "preview":
+                self.focus_region = "preview"
 
     # ── Header / hint line ──────────────────────────────────────
 
     def _render_header(self) -> str:
         n = len(self._app_ref.entries)
         focus_label = "列表" if self.focus_region == "list" else "预览"
+        if self.focus_region == "list":
+            hint = (
+                "↑/↓ j/k 选 · Enter 进入预览 · "
+                "0 返首页 · c 改目录 · ? 帮助"
+            )
+        else:
+            hint = (
+                "↑/↓/←/→ h/j/k/l 移动光标 (自动滚动) · "
+                "Esc 回列表 · 0 返首页"
+            )
         return (
-            f"[bold {AMBER}]{STAR} 记录 · {n} 篇[/]   "
+            f"[bold {AMBER}]{STAR} 洞察 · {n} 篇[/]   "
             f"[dim]焦点: [{AMBER}]{focus_label}[/][/]\n"
-            f"[dim]← → 切焦点 · 在「列表」用 ↑↓ 选条目 · 在「预览」用 ↑↓ 滚动 · 0 / Esc 返首页 · c 改目录[/]"
-        )
-
-    def _render_empty_preview(self) -> str:
-        return (
-            f"\n[dim]    选择左侧任一日记条目,这里会显示内容预览。[/]\n"
+            f"[dim]{hint}[/]"
         )
 
     # ── List population ──────────────────────────────────────
@@ -911,7 +967,7 @@ class BrowseView(Container):
     def _render_list(self) -> None:
         list_widget = self.query_one("#browse-list", Static)
         if not self._flat:
-            list_widget.update("[dim]还没有日记。按 1 进入编辑 tab 新建。[/]")
+            list_widget.update("[dim]还没有日记。按 2 进入创作 tab 新建。[/]")
             return
 
         # Find the flat-index cursor position in the rows list. Each
@@ -925,9 +981,12 @@ class BrowseView(Container):
             else:
                 e = payload  # type: ignore[assignment]
                 is_selected = (self.focus_region == "list" and flat_idx == self.cursor)
+                is_loaded = (self.focus_region == "preview" and flat_idx == self.cursor)
                 if is_selected:
                     # Bright amber text + ▸ cursor (no reverse block).
                     out.append(f"  [bold {AMBER}]▸  {e.date.strftime('%m-%d')}  {e.title or '无标题'}[/]")
+                elif is_loaded:
+                    out.append(f"  [dim]▸  {e.date.strftime('%m-%d')}  {e.title or '无标题'}[/]")
                 else:
                     out.append(f"    {self._entry_label(e)}")
                 flat_idx += 1
@@ -937,24 +996,37 @@ class BrowseView(Container):
 
     def _refresh_preview(self) -> None:
         if not self._flat:
+            self._set_preview_text("[dim]    选择左侧任一日记条目,这里会显示内容预览。[/]")
             return
         if self.cursor < 0 or self.cursor >= len(self._flat):
             return
         entry = self._flat[self.cursor]
         self._render_preview(entry)
-        # Reset scroll position to top whenever selection changes
+        # Move caret to top of preview when selection changes
         try:
-            scroll = self.query_one("#preview-scroll", VerticalScroll)
-            scroll.scroll_home(animate=False)
+            ta = self.query_one("#preview-textarea", _BrowsePreviewTextArea)
+            ta.cursor_location = (0, 0)
+        except Exception:
+            pass
+
+    def _set_preview_text(self, text: str) -> None:
+        try:
+            ta = self.query_one("#preview-textarea", _BrowsePreviewTextArea)
+            ta.text = text
         except Exception:
             pass
 
     def _render_preview(self, entry: Entry) -> None:
-        preview_widget = self.query_one("#browse-preview", Static)
+        # TextArea's `text` is a plain str, but it does support
+        # lightweight Rich markup via `text_markup` for syntax-highlight
+        # styled lines. For the preview we keep it readable plain
+        # text — the cursor needs line/column addressing, which works
+        # only on plain text.
         lines: list[str] = []
-        lines.append(f"[bold {AMBER}]{entry.date.isoformat()}[/]")
+        lines.append(f"{entry.date.isoformat()}")
         if entry.title:
-            lines.append(f"[bold {AMBER_SOFT}]{entry.title}[/]")
+            lines.append(f"{entry.title}")
+            lines.append("─" * max(8, len(entry.title) * 2))
         meta_bits: list[str] = []
         if entry.frontmatter.mood is not None:
             meta_bits.append(f"心情 m{entry.frontmatter.mood}")
@@ -965,14 +1037,17 @@ class BrowseView(Container):
         if entry.frontmatter.tags:
             meta_bits.append(" ".join(f"#{t}" for t in entry.frontmatter.tags))
         if meta_bits:
-            lines.append(f"[dim]{'  ·  '.join(meta_bits)}[/]")
+            lines.append("  ·  ".join(meta_bits))
         lines.append("")
         try:
+            # Strip rich markup from rendered body for plain-text
+            # display inside the TextArea.
             rendered_body = md_to_markup(entry.body or "")
+            rendered_body = _strip_markup(rendered_body)
         except Exception as e:
-            rendered_body = f"[red]渲染失败: {e}[/]"
+            rendered_body = f"渲染失败: {e}"
         lines.append(rendered_body)
-        preview_widget.update("\n".join(lines))
+        self._set_preview_text("\n".join(lines))
 
     # ── Focus / key handling ──────────────────────────────────────
 
@@ -980,15 +1055,15 @@ class BrowseView(Container):
         """Re-style list / preview borders to indicate which is focused."""
         try:
             list_widget = self.query_one("#browse-list", Static)
-            preview_widget = self.query_one("#browse-preview", Static)
+            # The preview "pane" is now the TextArea itself. We don't
+            # toggle classes on it (TextArea has its own focused style
+            # via Textual's default), we just toggle the list class.
         except Exception:
             return
         if self.focus_region == "list":
             list_widget.set_class(True, "focused")
-            preview_widget.set_class(False, "focused")
         else:
             list_widget.set_class(False, "focused")
-            preview_widget.set_class(True, "focused")
         # Refresh the header label and list selection indicator
         try:
             self.query_one("#browse-header", Static).update(self._render_header())
@@ -996,71 +1071,49 @@ class BrowseView(Container):
             pass
         self._render_list()
 
-    def watch_focus_region(self, _old, _new) -> None:
-        self._apply_focus_style()
-
     def watch_cursor(self, _old, _new) -> None:
         # Re-render list (cursor moved) and preview
         self._render_list()
         self._refresh_preview()
 
     # ── Action handlers (called from App-level BINDINGS) ────────
+    # In list focus, the Container is focused → App BINDINGS (↑/↓/Enter)
+    # fire here. In preview focus, the TextArea is focused → App
+    # BINDINGS are filtered out of Textual's binding chain, and the
+    # TextArea handles arrows as caret movement natively.
 
-    def _scroll_widget(self) -> VerticalScroll:
-        return self.query_one("#preview-scroll", VerticalScroll)
+    def action_cursor_up(self) -> None:
+        # Only called in list focus (preview is handled by TextArea).
+        if self.focus_region == "list" and self._flat:
+            self.cursor = (self.cursor - 1) % len(self._flat)
 
-    def action_browse_up(self) -> None:
-        if self.focus_region == "list":
-            if self._flat:
-                self.cursor = (self.cursor - 1) % len(self._flat)
-        else:
-            self._scroll_widget().scroll_up(animate=False)
+    def action_cursor_down(self) -> None:
+        if self.focus_region == "list" and self._flat:
+            self.cursor = (self.cursor + 1) % len(self._flat)
 
-    def action_browse_down(self) -> None:
-        if self.focus_region == "list":
-            if self._flat:
-                self.cursor = (self.cursor + 1) % len(self._flat)
-        else:
-            self._scroll_widget().scroll_down(animate=False)
-
-    def action_browse_left(self) -> None:
-        # In list: no-op (you're already at the leftmost pane).
-        # In preview: move focus back to list.
-        if self.focus_region == "preview":
-            self.focus_region = "list"
-
-    def action_browse_right(self) -> None:
-        # In list: move focus to preview (if there are entries).
-        # In preview: no-op (already at the rightmost pane).
+    def action_focus_preview(self) -> None:
+        """Enter in list focus → move focus to the preview TextArea."""
         if self.focus_region == "list" and self._flat:
             self.focus_region = "preview"
 
-    def action_browse_enter(self) -> None:
-        # Re-render preview explicitly (also fires automatically on
-        # cursor change, but Enter is the explicit "view this entry"
-        # affordance in the home view too).
-        if self.focus_region == "list" and self._flat:
-            self._refresh_preview()
-
-    def action_browse_pageup(self) -> None:
+    def action_focus_list(self) -> None:
+        """Esc / ← in preview focus → move focus back to the list.
+        In practice, Esc is handled by TextArea itself (calls
+        screen.focus_next) and our on_focus picks up the change.
+        This method exists so an explicit call (e.g. ← in preview
+        if we ever want it) can also drive the switch.
+        """
         if self.focus_region == "preview":
-            self._scroll_widget().scroll_page_up(animate=False)
+            self.focus_region = "list"
 
-    def action_browse_pagedown(self) -> None:
-        if self.focus_region == "preview":
-            self._scroll_widget().scroll_page_down(animate=False)
 
-    def action_browse_home(self) -> None:
-        if self.focus_region == "preview":
-            self._scroll_widget().scroll_home(animate=False)
-        elif self._flat:
-            self.cursor = 0
-
-    def action_browse_end(self) -> None:
-        if self.focus_region == "preview":
-            self._scroll_widget().scroll_end(animate=False)
-        elif self._flat:
-            self.cursor = len(self._flat) - 1
+def _strip_markup(text: str) -> str:
+    """Remove rich-style markup tags (e.g. [bold #E8A87C]foo[/]) from
+    a string. Used to feed a TextArea with plain text. Keep newlines
+    and indentation intact.
+    """
+    import re
+    return re.sub(r"\[/?[^\]]+\]", "", text)
 
 
 # ── 首页 Widget ──────────────────────────────────────
