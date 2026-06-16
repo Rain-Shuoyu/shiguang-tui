@@ -199,6 +199,8 @@ class EditView(Container):
         self._d_pending: bool = False
         # Track if 'n' is pending confirmation for overwriting today's entry.
         self._n_pending: bool = False
+        self._n_pending_ts: float = 0.0
+        self._N_PENDING_MS = 1500  # auto-clear after this window
         # Double-tap ← / → state. Each stores the timestamp of the last
         # single-tap; a second tap within `_DOUBLE_TAP_MS` switches focus.
         self._last_left_ts: float = 0.0
@@ -290,10 +292,23 @@ class EditView(Container):
                 out.append(f"  [bold {AMBER_SOFT}]{payload}[/]")
             else:
                 e = payload  # type: ignore[assignment]
-                is_selected = (self.focus_region == "list" and flat_idx == self.cursor)
-                if is_selected:
+                # In list focus, the cursor shows the bold ▸ + amber
+                # highlight. In editor focus, we still mark which
+                # entry is currently loaded — but with a dimmer
+                # indicator so the user can see the active file
+                # without confusing it with the focus cursor.
+                is_focus_cursor = (self.focus_region == "list" and flat_idx == self.cursor)
+                is_loaded = (self.focus_region == "editor" and flat_idx == self.cursor)
+                if is_focus_cursor:
                     out.append(
                         f"  [bold {AMBER}]▸  {e.date.strftime('%m-%d')}  {e.title or '无标题'}[/]"
+                    )
+                elif is_loaded:
+                    # Editor focus: show the currently-loaded entry
+                    # with a dim ▸ so the user can see which file
+                    # the editor is showing.
+                    out.append(
+                        f"  [dim]▸  {e.date.strftime('%m-%d')}  {e.title or '无标题'}[/]"
                     )
                 else:
                     out.append(f"    {self._entry_label(e)}")
@@ -326,6 +341,9 @@ class EditView(Container):
         # ignored by on_text_area_changed.
         self._last_saved_text = text
         self.dirty = False
+        # Loading a different entry invalidates any pending-N state.
+        self._n_pending = False
+        self._n_pending_ts = 0.0
         self._render_status_widget()
 
     def _render_status_widget(self) -> None:
@@ -562,20 +580,24 @@ class EditView(Container):
         self._save_current()
 
     def action_new_entry(self) -> None:
-        """`n` — create today's entry.
+        """`n` — create / jump to today's entry.
 
-        Three cases:
+        Behaviour:
         1. Today's entry doesn't exist → create template, jump to editor.
-        2. Today's entry exists, cursor is not on it → jump cursor to it
-           and load it into the editor (no focus switch — user stays
-           in list focus, sees ▸ on today, content in editor pane).
-        3. Today's entry exists, cursor IS on it (user pressed n twice)
-           → first press: show "[再按一次 n 覆盖]" hint in status bar;
-           second press within 1.5s: wipe to fresh template, jump to
-           editor, mark dirty.
+        2. Today's entry exists, no recent pending-N → move cursor to
+           today, load its content into the editor pane (no focus
+           switch), show a clear status-bar prompt: "今日已有 [N] 覆盖
+           [→] 编辑 [Esc] 取消".
+        3. Today's entry exists, second `n` within 1.5s → wipe editor
+           to fresh template, mark dirty, jump to editor focus.
 
         Works from either focus region.
         """
+        import time
+        now = time.monotonic()
+        # Auto-clear stale pending flag
+        if self._n_pending and (now - self._n_pending_ts) * 1000 > self._N_PENDING_MS:
+            self._n_pending = False
         # If user pressed n from editor focus, jump to list first so
         # they see the cursor land on today.
         if self.focus_region == "editor":
@@ -586,6 +608,7 @@ class EditView(Container):
         )
         if existing is None:
             self._n_pending = False
+            self._n_pending_ts = 0.0
             self._new_today()
             return
         # Today's entry exists — move cursor to it.
@@ -596,20 +619,22 @@ class EditView(Container):
         self._render_list()
         if not self._n_pending:
             # First press: load today's content into editor, show
-            # overwrite hint. Stay in list focus so user sees the
+            # clear choice hint. Stay in list focus so user sees the
             # ▸ cursor on today.
             self._n_pending = True
+            self._n_pending_ts = now
             self._load_into_editor()
             try:
                 self.query_one("#editor-status", Static).update(
-                    "  [bold #C97B4F]今日已有 · 再按一次 n 覆盖为空白模板[/]"
+                    "  [bold #C97B4F]今日已有 · "
+                    "[N 再按一次] 覆盖  [→] 进入编辑  [0] 取消[/]"
                 )
             except Exception:
                 pass
             return
-        # Second press within 1.5s: confirm overwrite with template.
-        # Jump to editor focus so the user can start typing.
+        # Second press within window: confirm overwrite with template.
         self._n_pending = False
+        self._n_pending_ts = 0.0
         self._current_path = None
         self._current_date = today
         ta = self.query_one("#edit-textarea", TextArea)

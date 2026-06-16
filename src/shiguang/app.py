@@ -123,22 +123,27 @@ class ShiGuangApp(App):
         Binding("2", "menu_pick(1)", "2 创作笔记", show=False),
         Binding("3", "menu_pick(2)", "3 洞察笔记", show=False),
         # Arrow / vim keys:
-        #   - ↑ / ↓ (and j / k) stay priority=True: in list focus they
-        #     move the cursor; in editor focus the action handler
-        #     re-focuses the textarea (so caret movement happens
-        #     via TextArea's native ↑/↓ — the action is a no-op
-        #     in editor).
-        #   - ← / → are NOT priority: TextArea consumes them for
-        #     caret movement. Double-tap is detected inside
-        #     EditView.action_browse_{left,right} via timestamps.
-        #     (App-level binding chain would otherwise strip the
-        #     TextArea's native handling.)
-        Binding("up",   "arrow_up",   show=False, priority=True),
-        Binding("down", "arrow_down", show=False, priority=True),
+        #   - ↑ / ↓ / ← / → are NOT priority. They are yielded to
+        #     TextArea for native caret movement when the editor is
+        #     focused. When the LIST is focused (Static widget,
+        #     doesn't consume keys), Textual's binding chain filter
+        #     does NOT strip the App binding — so the App action
+        #     handler fires and moves the list cursor.
+        #   - For ← / → a double-tap (within ~350ms) inside the
+        #     editor switches focus to the list pane. The double-tap
+        #     detection lives in EditView._handle_arrow_in_editor,
+        #     invoked from _ShiGuangTextArea._on_key.
+        #   - j / k are NOT priority either — they're yielded to
+        #     TextArea as printable characters in the editor (so the
+        #     user CAN type "j" and "k" inside a diary entry), and
+        #     act as vim-style down/up shortcuts in the list focus
+        #     (where Static doesn't claim them).
+        Binding("up",   "arrow_up",   show=False),
+        Binding("down", "arrow_down", show=False),
         Binding("left",  "arrow_left",  show=False),
         Binding("right", "arrow_right", show=False),
-        Binding("j", "arrow_down", show=False, priority=True),
-        Binding("k", "arrow_up",   show=False, priority=True),
+        Binding("j", "arrow_down", show=False),
+        Binding("k", "arrow_up",   show=False),
         Binding("enter", "arrow_enter", show=False, priority=True),
         Binding("pageup",   "arrow_pageup",   show=False),
         Binding("pagedown", "arrow_pagedown", show=False),
