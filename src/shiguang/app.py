@@ -22,7 +22,7 @@ from textual.screen import Screen, ModalScreen
 from textual.widgets import Footer, Static, TextArea, Input, ListView, ListItem, Label, Button
 
 from . import __version__
-from .config import load_state, default_diary_folder, state_file
+from .config import load_state, default_diary_folder, state_file, save_state
 from .diary import scan_folder, Entry, write_entry, today_entry, parse_date_from_filename
 from .frontmatter import Frontmatter
 from .markup import md_to_markup
@@ -121,18 +121,44 @@ class ShiGuangApp(App):
         Binding("1", "menu_pick(0)", "1 数据面板", show=False),
         Binding("2", "menu_pick(1)", "2 创作笔记", show=False),
         Binding("3", "menu_pick(2)", "3 洞察笔记", show=False),
-        # Arrow / vim keys: only used in home mode (no-op elsewhere)
-        Binding("up", "home_menu_up", show=False),
-        Binding("down", "home_menu_down", show=False),
-        Binding("j", "home_menu_down", show=False),
-        Binding("k", "home_menu_up", show=False),
-        Binding("enter", "home_menu_enter", show=False),
+        # Arrow / vim keys: routed by current mode (home menu or
+        # browse navigation). Action handlers check the mode.
+        Binding("up",   "arrow_up",   show=False),
+        Binding("down", "arrow_down", show=False),
+        Binding("left",  "arrow_left",  show=False),
+        Binding("right", "arrow_right", show=False),
+        Binding("j", "arrow_down", show=False),
+        Binding("k", "arrow_up",   show=False),
+        Binding("enter", "arrow_enter", show=False),
+        Binding("pageup",   "arrow_pageup",   show=False),
+        Binding("pagedown", "arrow_pagedown", show=False),
+        Binding("home", "arrow_home", show=False),
+        Binding("end",  "arrow_end",  show=False),
+        Binding("escape", "go_home_or_back", show=False),
+        Binding("c", "change_folder", show=False),
         Binding("?", "help", "? 帮助"),
         Binding("q", "quit", "q 退出", show=False),
     ]
 
     def action_help(self) -> None:
         self.push_screen("help")
+
+    def action_go_home_or_back(self) -> None:
+        """ESC: if a modal screen is on top, close it; otherwise
+        return to home mode.
+        """
+        # If a non-base screen is active, pop it (modal/overlay dismissal)
+        if len(self.screen_stack) > 1:
+            self.pop_screen()
+            return
+        # Otherwise go home (no-op if already home)
+        if self.current_mode != "home":
+            self.current_mode = "home"
+            self.render_mode()
+
+    def action_change_folder(self) -> None:
+        """`c` — open the folder-change modal from any mode."""
+        self.push_screen(ChangeFolderScreen(self))
 
     MY_MODES = ["home", "edit", "browse", "stats"]
     MODE_LABELS = {
@@ -229,6 +255,74 @@ class ShiGuangApp(App):
             except Exception:
                 pass
 
+    # ── Arrow-key router — dispatches by current mode ────────────
+
+    def _find_browse_view(self) -> Optional["BrowseView"]:
+        try:
+            return self.query_one(BrowseView)
+        except Exception:
+            return None
+
+    def action_arrow_up(self) -> None:
+        if self.current_mode == "home":
+            self.action_home_menu_up()
+        elif self.current_mode == "browse":
+            bv = self._find_browse_view()
+            if bv:
+                bv.action_browse_up()
+
+    def action_arrow_down(self) -> None:
+        if self.current_mode == "home":
+            self.action_home_menu_down()
+        elif self.current_mode == "browse":
+            bv = self._find_browse_view()
+            if bv:
+                bv.action_browse_down()
+
+    def action_arrow_left(self) -> None:
+        if self.current_mode == "browse":
+            bv = self._find_browse_view()
+            if bv:
+                bv.action_browse_left()
+
+    def action_arrow_right(self) -> None:
+        if self.current_mode == "browse":
+            bv = self._find_browse_view()
+            if bv:
+                bv.action_browse_right()
+
+    def action_arrow_enter(self) -> None:
+        if self.current_mode == "home":
+            self.action_home_menu_enter()
+        elif self.current_mode == "browse":
+            bv = self._find_browse_view()
+            if bv:
+                bv.action_browse_enter()
+
+    def action_arrow_pageup(self) -> None:
+        if self.current_mode == "browse":
+            bv = self._find_browse_view()
+            if bv:
+                bv.action_browse_pageup()
+
+    def action_arrow_pagedown(self) -> None:
+        if self.current_mode == "browse":
+            bv = self._find_browse_view()
+            if bv:
+                bv.action_browse_pagedown()
+
+    def action_arrow_home(self) -> None:
+        if self.current_mode == "browse":
+            bv = self._find_browse_view()
+            if bv:
+                bv.action_browse_home()
+
+    def action_arrow_end(self) -> None:
+        if self.current_mode == "browse":
+            bv = self._find_browse_view()
+            if bv:
+                bv.action_browse_end()
+
     # ── 顶部 status bar ──────────────────────────────────────
 
     def render_mode(self) -> None:
@@ -260,6 +354,11 @@ class ShiGuangApp(App):
         main.remove_children()
         if self.current_mode == "home":
             main.mount(HomeView(self))
+        elif self.current_mode == "browse":
+            # Browse mode uses an interactive ListView + preview pane,
+            # not the generic Static-content pipeline.
+            self.refresh_entries()
+            main.mount(BrowseView(self))
         else:
             scroll = VerticalScroll()
             main.mount(scroll)
@@ -333,33 +432,13 @@ class ShiGuangApp(App):
     # ── 2 记录 ──────────────────────────────────────
 
     def render_browse(self, target: Static) -> None:
-        self.refresh_entries()
-        if not self.entries:
-            target.update(
-                f"[bold {AMBER}]{STAR} 记录[/]\n\n"
-                f"[dim]还没有日记。按 1 进入编辑 tab 新建。[/]"
-            )
-            return
-        lines: list[str] = []
-        lines.append(f"[bold {AMBER}]{STAR} 记录 · {len(self.entries)} 篇[/]")
-        lines.append(f"[dim]按 / 搜索 · 回车打开阅读 · 0 切回首页[/]")
-        lines.append("")
-
-        from collections import defaultdict
-        by_month: dict[str, list[Entry]] = defaultdict(list)
-        for e in self.entries:
-            by_month[e.date.strftime("%Y-%m")].append(e)
-
-        for month in sorted(by_month.keys(), reverse=True):
-            lines.append(f"  [{AMBER}]{month}[/]")
-            for e in sorted(by_month[month], key=lambda x: x.date, reverse=True):
-                title = e.title[:40] if e.title else "无标题"
-                preview = e.preview[:55]
-                lines.append(f"    [dim]·[/]  {e.date.strftime('%m-%d')}  [bold {AMBER_SOFT}]{title}[/]")
-                if preview:
-                    lines.append(f"        [dim]{preview}[/]")
-            lines.append("")
-        target.update("\n".join(lines))
+        # Browse mode is rendered by BrowseView widget (mounted
+        # directly in render_mode). This method is left here as a
+        # no-op fallback in case the generic pipeline is hit.
+        target.update(
+            f"[bold {AMBER}]{STAR} 记录[/]\n\n"
+            f"[dim]请按 2 切到记录 tab。[/]"
+        )
 
     # ── 3 报表 ──────────────────────────────────────
 
@@ -530,6 +609,393 @@ class HelpScreen(Screen):
 # ── 注册 + 入口 ──────────────────────────────────────
 
 ShiGuangApp.SCREENS = {"help": HelpScreen}
+
+
+# ── 改目录 Modal ──────────────────────────────────────
+
+class ChangeFolderScreen(ModalScreen):
+    """Modal: prompt user to type a folder path. On submit,
+    update app state and refresh."""
+
+    BINDINGS = [
+        Binding("escape", "app.pop_screen", "取消", show=False),
+    ]
+
+    CSS = f"""
+    ChangeFolderScreen {{
+        background: #14110F;
+        align: center middle;
+    }}
+    #cf-container {{
+        width: 70%;
+        max-width: 80;
+        height: auto;
+        padding: 2 3;
+        border: round {AMBER};
+        background: #1F1A16;
+    }}
+    #cf-title {{
+        margin-bottom: 1;
+    }}
+    #cf-current {{
+        margin-bottom: 1;
+    }}
+    #cf-input {{
+        margin-bottom: 1;
+    }}
+    #cf-hint {{
+        margin-top: 1;
+    }}
+    """
+
+    def __init__(self, app: "ShiGuangApp") -> None:
+        super().__init__()
+        self._app_ref = app
+
+    def compose(self) -> ComposeResult:
+        yield Container(
+            Static(
+                f"[bold {AMBER}]{STAR} 修改日记目录[/]",
+                id="cf-title",
+            ),
+            Static(
+                f"[dim]当前: {self._app_ref.folder}[/]",
+                id="cf-current",
+            ),
+            Input(
+                value=str(self._app_ref.folder),
+                placeholder="新目录的绝对路径(留空取消)",
+                id="cf-input",
+            ),
+            Static(
+                f"[dim]回车确认 · Esc 取消 · 路径不存在将自动创建[/]",
+                id="cf-hint",
+            ),
+            id="cf-container",
+        )
+
+    def on_mount(self) -> None:
+        # Focus the input on mount
+        self.query_one("#cf-input", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        raw = event.value.strip()
+        if not raw:
+            self.app.pop_screen()
+            return
+        new_path = Path(raw).expanduser().resolve()
+        try:
+            new_path.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            # Show error inline; do not close.
+            self.query_one("#cf-hint", Static).update(
+                f"[red]创建目录失败: {e}[/]"
+            )
+            return
+        # Update app state
+        self._app_ref.state.diary_folder = str(new_path)
+        save_state(self._app_ref.state)
+        self._app_ref.folder = new_path
+        self._app_ref.refresh_entries()
+        self._app_ref.render_mode()
+        self.app.pop_screen()
+
+
+# ── 记录 (Browse) 视图 — ListView + Markdown 预览 ──────────────────────
+
+class BrowseView(Container):
+    """The '记录' (browse) mode: a left-side list of entries grouped by
+    month, and a right-side preview pane showing the selected entry's
+    rendered markdown.
+
+    Pure keyboard, vim-style. No mouse / Tab / click.
+
+    Two focus regions, switched with ←/→:
+      - "list"   (default on mount) — ↑/↓ or k/j move the cursor, Enter
+                  re-renders the preview for the highlighted row.
+      - "preview" — ↑/↓ or k/j scroll the preview pane; ← returns to
+                    the list.
+
+    Global keys (always available in browse mode):
+      - 0 / Esc: back to home
+      - c:       change diary folder
+    """
+
+    DEFAULT_CSS = f"""
+    BrowseView {{
+        height: 1fr;
+    }}
+    #browse-header {{
+        height: 3;
+        padding: 0 1;
+    }}
+    #browse-body {{
+        height: 1fr;
+    }}
+    #browse-list {{
+        width: 40%;
+        min-width: 24;
+        height: 1fr;
+        padding: 0 1;
+        border: round {AMBER_DEEP};
+        background: #14110F;
+    }}
+    #browse-list.focused {{
+        border: round {AMBER};
+    }}
+    #browse-preview {{
+        width: 1fr;
+        height: 1fr;
+        border: round {AMBER_DEEP};
+        background: #14110F;
+    }}
+    #browse-preview.focused {{
+        border: round {AMBER};
+    }}
+    #preview-scroll {{
+        height: 1fr;
+    }}
+    """
+
+    BINDINGS = [
+        # BrowseView keys are routed via the App-level BINDINGS
+        # (action_arrow_*), because Container is not focusable by
+        # default. Keeping this empty prevents stale duplicates.
+    ]
+
+    # Two focus regions. Reactive so we can watch changes and re-style
+    # the borders.
+    focus_region: reactive[str] = reactive("list")
+    # Cursor index into self._flat (skipping month-header rows).
+    cursor: reactive[int] = reactive(0)
+
+    def __init__(self, app: "ShiGuangApp") -> None:
+        super().__init__(id="browse-view")
+        self._app_ref = app
+        # Two parallel arrays describing the rendered list:
+        #   _rows        : list of (kind, payload) where kind in {"header","entry"}
+        #   _flat        : list of Entry, indexed the same way as kind=="entry" rows
+        self._rows: list[tuple[str, object]] = []
+        self._flat: list[Entry] = []
+
+    def compose(self) -> ComposeResult:
+        yield Static(self._render_header(), id="browse-header")
+        with Horizontal(id="browse-body"):
+            yield Static("", id="browse-list")
+            with VerticalScroll(id="preview-scroll"):
+                yield Static(self._render_empty_preview(), id="browse-preview")
+
+    def on_mount(self) -> None:
+        self._populate_list()
+        # Style initial focus
+        self._apply_focus_style()
+
+    # ── Header / hint line ──────────────────────────────────────
+
+    def _render_header(self) -> str:
+        n = len(self._app_ref.entries)
+        focus_label = "列表" if self.focus_region == "list" else "预览"
+        return (
+            f"[bold {AMBER}]{STAR} 记录 · {n} 篇[/]   "
+            f"[dim]焦点: [{AMBER}]{focus_label}[/][/]\n"
+            f"[dim]← → 切焦点 · 在「列表」用 ↑↓ 选条目 · 在「预览」用 ↑↓ 滚动 · 0 / Esc 返首页 · c 改目录[/]"
+        )
+
+    def _render_empty_preview(self) -> str:
+        return (
+            f"\n[dim]    选择左侧任一日记条目,这里会显示内容预览。[/]\n"
+        )
+
+    # ── List population ──────────────────────────────────────
+
+    def _populate_list(self) -> None:
+        from collections import defaultdict
+        self._rows = []
+        self._flat = []
+        by_month: dict[str, list[Entry]] = defaultdict(list)
+        for e in self._app_ref.entries:
+            by_month[e.date.strftime("%Y-%m")].append(e)
+
+        for month in sorted(by_month.keys(), reverse=True):
+            self._rows.append(("header", month))
+            for e in sorted(by_month[month], key=lambda x: x.date, reverse=True):
+                self._rows.append(("entry", e))
+                self._flat.append(e)
+
+        # Clamp cursor
+        if self._flat:
+            self.cursor = max(0, min(self.cursor, len(self._flat) - 1))
+        else:
+            self.cursor = 0
+
+        self._render_list()
+        self._refresh_preview()
+
+    def _entry_label(self, e: Entry) -> str:
+        title = e.title or "无标题"
+        mood_badge = ""
+        if e.frontmatter.mood is not None:
+            mood_badge = f" [dim]m{e.frontmatter.mood}[/]"
+        tag_badge = ""
+        if e.frontmatter.tags:
+            tag_badge = f" [dim]#{e.frontmatter.tags[0]}[/]"
+        return (
+            f"  [bold {AMBER_SOFT}]{e.date.strftime('%m-%d')}[/]  "
+            f"{title[:24]}{mood_badge}{tag_badge}"
+        )
+
+    def _render_list(self) -> None:
+        list_widget = self.query_one("#browse-list", Static)
+        if not self._flat:
+            list_widget.update("[dim]还没有日记。按 1 进入编辑 tab 新建。[/]")
+            return
+
+        # Find the flat-index cursor position in the rows list. Each
+        # "entry" row corresponds to one flat entry; "header" rows do
+        # not consume a flat index.
+        flat_idx = 0
+        out: list[str] = []
+        for kind, payload in self._rows:
+            if kind == "header":
+                out.append(f"  [bold {AMBER_SOFT}]{payload}[/]")
+            else:
+                e = payload  # type: ignore[assignment]
+                is_selected = (self.focus_region == "list" and flat_idx == self.cursor)
+                if is_selected:
+                    out.append(f"  [reverse] [bold {AMBER}]▸ {self._entry_label(e).strip()}[/]")
+                else:
+                    out.append(f"  {self._entry_label(e)}")
+                flat_idx += 1
+        list_widget.update("\n".join(out))
+
+    # ── Preview pane ──────────────────────────────────────
+
+    def _refresh_preview(self) -> None:
+        if not self._flat:
+            return
+        if self.cursor < 0 or self.cursor >= len(self._flat):
+            return
+        entry = self._flat[self.cursor]
+        self._render_preview(entry)
+        # Reset scroll position to top whenever selection changes
+        try:
+            scroll = self.query_one("#preview-scroll", VerticalScroll)
+            scroll.scroll_home(animate=False)
+        except Exception:
+            pass
+
+    def _render_preview(self, entry: Entry) -> None:
+        preview_widget = self.query_one("#browse-preview", Static)
+        lines: list[str] = []
+        lines.append(f"[bold {AMBER}]{entry.date.isoformat()}[/]")
+        if entry.title:
+            lines.append(f"[bold {AMBER_SOFT}]{entry.title}[/]")
+        meta_bits: list[str] = []
+        if entry.frontmatter.mood is not None:
+            meta_bits.append(f"心情 m{entry.frontmatter.mood}")
+        if entry.frontmatter.mood_label:
+            meta_bits.append(entry.frontmatter.mood_label)
+        if entry.frontmatter.weather:
+            meta_bits.append(f"天气 {entry.frontmatter.weather}")
+        if entry.frontmatter.tags:
+            meta_bits.append(" ".join(f"#{t}" for t in entry.frontmatter.tags))
+        if meta_bits:
+            lines.append(f"[dim]{'  ·  '.join(meta_bits)}[/]")
+        lines.append("")
+        try:
+            rendered_body = md_to_markup(entry.body or "")
+        except Exception as e:
+            rendered_body = f"[red]渲染失败: {e}[/]"
+        lines.append(rendered_body)
+        preview_widget.update("\n".join(lines))
+
+    # ── Focus / key handling ──────────────────────────────────────
+
+    def _apply_focus_style(self) -> None:
+        """Re-style list / preview borders to indicate which is focused."""
+        try:
+            list_widget = self.query_one("#browse-list", Static)
+            preview_widget = self.query_one("#browse-preview", Static)
+        except Exception:
+            return
+        if self.focus_region == "list":
+            list_widget.set_class(True, "focused")
+            preview_widget.set_class(False, "focused")
+        else:
+            list_widget.set_class(False, "focused")
+            preview_widget.set_class(True, "focused")
+        # Refresh the header label and list selection indicator
+        try:
+            self.query_one("#browse-header", Static).update(self._render_header())
+        except Exception:
+            pass
+        self._render_list()
+
+    def watch_focus_region(self, _old, _new) -> None:
+        self._apply_focus_style()
+
+    def watch_cursor(self, _old, _new) -> None:
+        # Re-render list (cursor moved) and preview
+        self._render_list()
+        self._refresh_preview()
+
+    # ── Action handlers (called from App-level BINDINGS) ────────
+
+    def _scroll_widget(self) -> VerticalScroll:
+        return self.query_one("#preview-scroll", VerticalScroll)
+
+    def action_browse_up(self) -> None:
+        if self.focus_region == "list":
+            if self._flat:
+                self.cursor = (self.cursor - 1) % len(self._flat)
+        else:
+            self._scroll_widget().scroll_up(animate=False)
+
+    def action_browse_down(self) -> None:
+        if self.focus_region == "list":
+            if self._flat:
+                self.cursor = (self.cursor + 1) % len(self._flat)
+        else:
+            self._scroll_widget().scroll_down(animate=False)
+
+    def action_browse_left(self) -> None:
+        # In list: no-op (you're already at the leftmost pane).
+        # In preview: move focus back to list.
+        if self.focus_region == "preview":
+            self.focus_region = "list"
+
+    def action_browse_right(self) -> None:
+        # In list: move focus to preview (if there are entries).
+        # In preview: no-op (already at the rightmost pane).
+        if self.focus_region == "list" and self._flat:
+            self.focus_region = "preview"
+
+    def action_browse_enter(self) -> None:
+        # Re-render preview explicitly (also fires automatically on
+        # cursor change, but Enter is the explicit "view this entry"
+        # affordance in the home view too).
+        if self.focus_region == "list" and self._flat:
+            self._refresh_preview()
+
+    def action_browse_pageup(self) -> None:
+        if self.focus_region == "preview":
+            self._scroll_widget().scroll_page_up(animate=False)
+
+    def action_browse_pagedown(self) -> None:
+        if self.focus_region == "preview":
+            self._scroll_widget().scroll_page_down(animate=False)
+
+    def action_browse_home(self) -> None:
+        if self.focus_region == "preview":
+            self._scroll_widget().scroll_home(animate=False)
+        elif self._flat:
+            self.cursor = 0
+
+    def action_browse_end(self) -> None:
+        if self.focus_region == "preview":
+            self._scroll_widget().scroll_end(animate=False)
+        elif self._flat:
+            self.cursor = len(self._flat) - 1
 
 
 # ── 首页 Widget ──────────────────────────────────────
