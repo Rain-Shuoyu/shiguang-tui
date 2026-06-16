@@ -44,9 +44,13 @@ from . import __version__
 # TextArea is focused. We have to claim TextArea doesn't consume
 # these (otherwise Textual's screen._binding_chain filter will
 # remove the App's bindings for them).
+#
+# Note: arrows ("left", "right", "up", "down") are NOT in this set.
+# We yield them back to the TextArea for native caret movement.
+# Focus switching is done via double-tap ←/→ handled inside EditView.
 APP_CAPTURED_KEYS = frozenset({
-    "n", "d", "c", "j", "k", "0", "1", "2", "3", "q", "question_mark",
-    "left", "right", "up", "down", "enter", "escape", "ctrl+s",
+    "n", "d", "c", "0", "1", "2", "3", "q", "question_mark",
+    "enter", "escape", "ctrl+s",
 })
 
 
@@ -66,18 +70,39 @@ class _ShiGuangTextArea(TextArea):
     - `_on_key` short-circuits those same keys so the TextArea doesn't
       insert the character into the text. The event propagates to the
       App, which dispatches the priority binding.
+
+    Arrow keys (←/→) are handled differently: a single press is left
+    to TextArea for native caret movement, but a double-tap (within
+    ~350ms) is swallowed and triggers a focus switch to the list pane
+    via a callback on the parent EditView.
     """
 
     def check_consume_key(self, key: str, character=None) -> bool:  # type: ignore[override]
         if key in APP_CAPTURED_KEYS:
             return False
+        # Yield arrows to TextArea for native caret movement; double-tap
+        # detection is done in `_on_key`.
         return super().check_consume_key(key, character)
 
-    def _on_key(self, event) -> None:  # type: ignore[override]
+    async def _on_key(self, event) -> None:  # type: ignore[override]
         if event.key in APP_CAPTURED_KEYS:
             # Let the App-level priority binding fire. Don't insert.
             return
-        super()._on_key(event)
+        # Double-tap detection for ← / →. Walk the DOM to find the
+        # parent EditView (mounted with id="edit-view"). On a double
+        # tap, swallow the event and let EditView switch focus.
+        if event.key in ("left", "right"):
+            try:
+                ev = self.screen.query_one("#edit-view")  # type: ignore[attr-defined]
+            except Exception:
+                ev = None
+            if ev is not None and getattr(ev, "_handle_arrow_in_editor", None):
+                consumed = ev._handle_arrow_in_editor(event.key)
+                if consumed:
+                    event.prevent_default()
+                    event.stop()
+                    return
+        await super()._on_key(event)
 
 
 # Reuse the project's amber palette
@@ -172,6 +197,13 @@ class EditView(Container):
         self._current_date: date_cls = date_cls.today()
         # Track if a 'd' key was pressed; second 'd' within 1s triggers delete.
         self._d_pending: bool = False
+        # Track if 'n' is pending confirmation for overwriting today's entry.
+        self._n_pending: bool = False
+        # Double-tap ← / → state. Each stores the timestamp of the last
+        # single-tap; a second tap within `_DOUBLE_TAP_MS` switches focus.
+        self._last_left_ts: float = 0.0
+        self._last_right_ts: float = 0.0
+        self._DOUBLE_TAP_MS = 350
         # Snapshot of the text last loaded into / saved from the TextArea.
         # Used by on_text_area_changed to distinguish real user edits from
         # programmatic text replacement (which Textual posts as Changed
@@ -206,7 +238,7 @@ class EditView(Container):
         return (
             f"[bold {AMBER}]{STAR} 创作笔记 · {n} 篇[/]   "
             f"[dim]焦点: [{AMBER}]{focus_label}[/][/]\n"
-            f"[dim]← → 切焦点 · 列表 ↑↓ 选 · n 新建今日 · dd 删除 · Ctrl+S 保存 · 0/Esc 返首页 · c 改目录[/]"
+            f"[dim]双击 ← / → 切焦点 · 列表 ↑↓ 选 · n 新建今日 · dd 删除 · Ctrl+S 保存 · 0/Esc 返首页 · c 改目录[/]"
         )
 
     def _render_status(self) -> str:
@@ -449,8 +481,9 @@ class EditView(Container):
             if self._flat:
                 self.cursor = (self.cursor - 1) % len(self._flat)
         else:
-            # In editor: let TextArea handle up/down for caret movement.
-            # We don't intercept here.
+            # In editor: TextArea handles up/down natively (we removed
+            # these from APP_CAPTURED_KEYS). Just re-focus the textarea
+            # so the user sees the caret move.
             ta = self.query_one("#edit-textarea", TextArea)
             ta.focus()
 
@@ -463,19 +496,50 @@ class EditView(Container):
             ta.focus()
 
     def action_browse_left(self) -> None:
-        # With App-level priority binding, ← fires even when TextArea
-        # is focused. In editor, ← returns focus to list; in list, it's
-        # a no-op (we're already at the leftmost pane).
-        if self.focus_region == "editor":
-            self.focus_region = "list"
-        # else: no-op (already at leftmost pane)
+        # In list focus, ← is a no-op (already at the leftmost pane).
+        # In editor focus, ← is handled inside _ShiGuangTextArea
+        # (double-tap detection + caret movement). This method should
+        # not be reached in editor focus because the App-level
+        # binding is filtered out by _ShiGuangTextArea.check_consume_key.
+        pass
 
     def action_browse_right(self) -> None:
-        # → in list switches to editor; in editor it's a no-op
-        # (TextArea's own right-arrow for cursor movement is
-        # sacrificed — use End / Ctrl+Right for line/word nav).
+        # In list focus, → switches to the editor pane.
         if self.focus_region == "list" and self._flat:
             self.focus_region = "editor"
+        # In editor focus, → is handled inside _ShiGuangTextArea
+        # (double-tap detection + caret movement).
+
+    def _handle_arrow_in_editor(self, key: str) -> bool:
+        """Double-tap detection for ← / → when the editor is focused.
+
+        Called by `_ShiGuangTextArea._on_key` *before* TextArea's default
+        handler runs. Returns True if the event was consumed (i.e. a
+        double-tap → focus switch to the list); False if the event
+        should fall through to TextArea for normal caret movement.
+
+        Both `←` and `→` are double-tap-switch-to-list, symmetric. The
+        first tap records the timestamp and returns False (TextArea
+        moves the caret). The second tap within `_DOUBLE_TAP_MS`
+        switches focus to the list and returns True.
+        """
+        import time
+        now = time.monotonic()
+        if key == "left":
+            if (now - self._last_left_ts) * 1000 < self._DOUBLE_TAP_MS:
+                self._last_left_ts = 0.0
+                self.focus_region = "list"
+                return True
+            self._last_left_ts = now
+            return False
+        if key == "right":
+            if (now - self._last_right_ts) * 1000 < self._DOUBLE_TAP_MS:
+                self._last_right_ts = 0.0
+                self.focus_region = "list"
+                return True
+            self._last_right_ts = now
+            return False
+        return False
 
     def action_browse_enter(self) -> None:
         if self.focus_region == "list" and self._flat:
@@ -498,12 +562,65 @@ class EditView(Container):
         self._save_current()
 
     def action_new_entry(self) -> None:
-        # `n` works from either focus region. From the editor, switch
-        # focus to list first so the user sees the selection move to
-        # today's entry.
+        """`n` — create today's entry.
+
+        Three cases:
+        1. Today's entry doesn't exist → create template, jump to editor.
+        2. Today's entry exists, cursor is not on it → jump cursor to it
+           and load it into the editor (no focus switch — user stays
+           in list focus, sees ▸ on today, content in editor pane).
+        3. Today's entry exists, cursor IS on it (user pressed n twice)
+           → first press: show "[再按一次 n 覆盖]" hint in status bar;
+           second press within 1.5s: wipe to fresh template, jump to
+           editor, mark dirty.
+
+        Works from either focus region.
+        """
+        # If user pressed n from editor focus, jump to list first so
+        # they see the cursor land on today.
         if self.focus_region == "editor":
             self.focus_region = "list"
-        self._new_today()
+        today = date_cls.today()
+        existing = next(
+            (e for e in self._app_ref.entries if e.date == today), None
+        )
+        if existing is None:
+            self._n_pending = False
+            self._new_today()
+            return
+        # Today's entry exists — move cursor to it.
+        for i, e in enumerate(self._flat):
+            if e.path == existing.path:
+                self.cursor = i
+                break
+        self._render_list()
+        if not self._n_pending:
+            # First press: load today's content into editor, show
+            # overwrite hint. Stay in list focus so user sees the
+            # ▸ cursor on today.
+            self._n_pending = True
+            self._load_into_editor()
+            try:
+                self.query_one("#editor-status", Static).update(
+                    "  [bold #C97B4F]今日已有 · 再按一次 n 覆盖为空白模板[/]"
+                )
+            except Exception:
+                pass
+            return
+        # Second press within 1.5s: confirm overwrite with template.
+        # Jump to editor focus so the user can start typing.
+        self._n_pending = False
+        self._current_path = None
+        self._current_date = today
+        ta = self.query_one("#edit-textarea", TextArea)
+        text = NEW_ENTRY_TEMPLATE.format(date=today.isoformat())
+        ta.text = text
+        self._last_saved_text = text
+        self.dirty = True
+        self._render_status_widget()
+        self._render_list()
+        self.focus_region = "editor"
+        self._focus_textarea()
 
     def action_delete_entry(self) -> None:
         # Two-step: 'd' sets a pending flag. A second 'd' within ~1s

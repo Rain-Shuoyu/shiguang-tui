@@ -122,14 +122,21 @@ class ShiGuangApp(App):
         Binding("1", "menu_pick(0)", "1 数据面板", show=False),
         Binding("2", "menu_pick(1)", "2 创作笔记", show=False),
         Binding("3", "menu_pick(2)", "3 洞察笔记", show=False),
-        # Arrow / vim keys — all priority=True so they fire even
-        # when the TextArea is focused (TextArea consumes arrows for
-        # caret movement by default; we trade that for focus
-        # switching in edit mode). Use Home/End/Ctrl+arrows in editor.
+        # Arrow / vim keys:
+        #   - ↑ / ↓ (and j / k) stay priority=True: in list focus they
+        #     move the cursor; in editor focus the action handler
+        #     re-focuses the textarea (so caret movement happens
+        #     via TextArea's native ↑/↓ — the action is a no-op
+        #     in editor).
+        #   - ← / → are NOT priority: TextArea consumes them for
+        #     caret movement. Double-tap is detected inside
+        #     EditView.action_browse_{left,right} via timestamps.
+        #     (App-level binding chain would otherwise strip the
+        #     TextArea's native handling.)
         Binding("up",   "arrow_up",   show=False, priority=True),
         Binding("down", "arrow_down", show=False, priority=True),
-        Binding("left",  "arrow_left",  show=False, priority=True),
-        Binding("right", "arrow_right", show=False, priority=True),
+        Binding("left",  "arrow_left",  show=False),
+        Binding("right", "arrow_right", show=False),
         Binding("j", "arrow_down", show=False, priority=True),
         Binding("k", "arrow_up",   show=False, priority=True),
         Binding("enter", "arrow_enter", show=False, priority=True),
