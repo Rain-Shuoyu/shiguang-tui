@@ -33,6 +33,7 @@ from textual.widgets import Footer, Static
 from . import __version__
 from .config import load_state, default_diary_folder, state_file
 from .diary import scan_folder, Entry, today_entry
+from .markup import md_to_markup
 from .algorithms import (
     daily_practice as dp,
     anniversary as anniv,
@@ -371,22 +372,16 @@ class ShiGuangApp(App):
             if meta_str:
                 lines.append(f"  [dim]{meta_str}[/]")
             lines.append("")
-            # body
+            # body — convert markdown to rich markup so **bold**,
+            # ## headers, > quotes, - bullets all render properly
+            # in the terminal instead of as raw characters.
             body = today_e.body.strip()
-            for line in body.split("\n"):
-                if line.startswith("# "):
-                    continue
-                if line.startswith("## "):
-                    lines.append(f"  [{AMBER}]{line.lstrip('# ').strip()}[/]")
-                elif line.startswith("> "):
-                    lines.append(f"  [dim]{DOT}[/]  [italic]{line[2:]}[/]")
-                elif line.strip():
-                    lines.append(f"  {line}")
-                else:
-                    lines.append("")
-            # trim to first 25 lines to keep today card compact
-            if len(lines) > 40:
-                lines = lines[:40] + [f"  [dim]… (更多按 1 切到写作 tab)[/]"]
+            if body:
+                body_markup = md_to_markup(body)
+                lines.append(body_markup)
+            # trim if too long
+            if len(lines) > 50:
+                lines = lines[:50] + [f"  [dim]… (更多按 1 切到写作 tab)[/]"]
         else:
             lines.append(f"  [dim]──────[/]  [{AMBER}]{ARROW} 今天的日记[/]")
             lines.append(f"  [dim]今天还没写。按 `n` 新建。[dim]")
@@ -415,9 +410,9 @@ class ShiGuangApp(App):
             lines.append("")
             for m in anniv_matches[:3]:
                 lines.append(f"  [{AMBER_SOFT}]{m.years_ago} 年前[/]  [dim]·[/]  {m.entry.title}")
-                # 1-line preview
-                preview = m.preview.split("\n")[0][:60]
-                lines.append(f"  [dim]{preview}[/]")
+                # first line of preview (already stripped of markdown markers)
+                first = m.preview.split("\n")[0][:80]
+                lines.append(f"  [dim]{first}[/]")
                 lines.append("")
 
         # ── 情绪急救
@@ -488,9 +483,11 @@ class ShiGuangApp(App):
             lines.append(f"  [dim]──────[/]  [{AMBER}]{m.years_ago} 年前[/]  [dim]·[/]  {m.entry.title}")
             lines.append(f"  [dim]{m.entry.date.isoformat()}[/]")
             lines.append("")
-            for line in m.preview.split("\n"):
-                if line.strip():
-                    lines.append(f"  {line}")
+            # Convert preview body to rich markup so headers /
+            # quotes / bullets render correctly in the terminal.
+            preview = m.preview
+            if preview.strip():
+                lines.append(md_to_markup(preview))
             lines.append("")
         target.update("\n".join(lines))
 
@@ -521,10 +518,11 @@ class ShiGuangApp(App):
         for e in rescued:
             lines.append(f"  [dim]──────[/]  [{COOL_BLUE}]{e.date.isoformat()}[/]  [dim]·[/]  {e.title}")
             lines.append("")
-            # first 6 lines
-            for line in e.body.strip().split("\n")[:6]:
-                if line.strip():
-                    lines.append(f"  {line}")
+            # First 6 lines of body, converted to rich markup
+            body_lines = e.body.strip().split("\n")[:6]
+            snippet = "\n".join(body_lines)
+            if snippet.strip():
+                lines.append(md_to_markup(snippet))
             if len(e.body.strip().split("\n")) > 6:
                 lines.append(f"  [dim]…[/]")
             lines.append("")

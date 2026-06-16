@@ -25,8 +25,25 @@ class Entry:
 
     @property
     def preview(self) -> str:
-        """First ~200 chars of the body, single-line."""
-        text = self.body.strip().replace("\n", " ")
+        """First ~200 chars of the body, single-line, markdown stripped.
+
+        Used for list views, writing tab, etc. — anywhere we want a
+        *plain* one-line summary without raw markdown characters
+        showing up in the terminal.
+        """
+        import re as _re
+        text = self.body.strip()
+        # Drop leading # / ## / ### / etc. on each line
+        text = _re.sub(r"^#{1,6}\s+", "", text, flags=_re.MULTILINE)
+        # Drop blockquote markers
+        text = _re.sub(r"^>\s*", "", text, flags=_re.MULTILINE)
+        # Strip inline **bold**, *italic*, `code`, [link](url)
+        text = _re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+        text = _re.sub(r"(?<!\*)\*([^*]+?)\*(?!\*)", r"\1", text)
+        text = _re.sub(r"`([^`]+?)`", r"\1", text)
+        text = _re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", text)
+        # Collapse whitespace
+        text = _re.sub(r"\s+", " ", text).strip()
         if len(text) <= 200:
             return text
         return text[:200] + "…"
