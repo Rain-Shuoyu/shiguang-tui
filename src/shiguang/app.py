@@ -16,10 +16,10 @@ from typing import Optional
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, VerticalScroll, Horizontal
+from textual.containers import Container, VerticalScroll, Horizontal, Vertical
 from textual.reactive import reactive
 from textual.screen import Screen, ModalScreen
-from textual.widgets import Footer, Static, TextArea, Input, ListView, ListItem, Label
+from textual.widgets import Footer, Static, TextArea, Input, ListView, ListItem, Label, Button
 
 from . import __version__
 from .config import load_state, default_diary_folder, state_file
@@ -27,6 +27,7 @@ from .diary import scan_folder, Entry, write_entry, today_entry, parse_date_from
 from .frontmatter import Frontmatter
 from .markup import md_to_markup
 from . import stats as stats_mod
+from .logo import render_logo, render_glow_rings
 
 
 # ── 视觉常量 ──────────────────────────────────────────────
@@ -62,6 +63,39 @@ class ShiGuangApp(App):
     }}
 
     #main-area {{
+        padding: 1 2;
+    }}
+
+    /* Home screen — centered, no scroll */
+    #home-screen {{
+        align: center middle;
+        height: 1fr;
+    }}
+    #home-content {{
+        width: 60;
+        height: auto;
+        padding: 2 4;
+        align: center middle;
+    }}
+    .menu-item {{
+        height: 3;
+        width: 36;
+        content-align: center middle;
+        margin: 1 0;
+        background: #1F1A16;
+        border: round {AMBER_DEEP};
+    }}
+    .menu-item:hover {{
+        background: #2A201A;
+        border: round {AMBER};
+    }}
+    .menu-item:focus {{
+        background: #2A201A;
+        border: round {AMBER};
+    }}
+
+    /* Other modes — scrollable */
+    #content {{
         padding: 1 2;
     }}
 
@@ -117,8 +151,9 @@ class ShiGuangApp(App):
 
     def compose(self) -> ComposeResult:
         yield Static(id="mode-indicator")
-        with VerticalScroll(id="main-area"):
-            yield Static("加载中…", id="content")
+        # The home screen and other modes use different layouts;
+        # we mount/unmount them dynamically in render_mode().
+        yield Container(id="main-area")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -162,84 +197,34 @@ class ShiGuangApp(App):
             f"[dim]{self.folder.name}{ARROW} {now}[/]"
         )
 
-        content = self.query_one("#content", Static)
-        renderer = getattr(self, f"render_{self.current_mode}", None)
-        if renderer is None:
-            content.update(f"模式 {self.current_mode} 暂未实现")
-            return
-        try:
-            renderer(content)
-        except Exception as e:
-            content.update(f"[red]渲染出错: {e}[/]")
+        # Clear and re-render the main area
+        main = self.query_one("#main-area")
+        main.remove_children()
+        if self.current_mode == "home":
+            main.mount(HomeView(self))
+        else:
+            scroll = VerticalScroll()
+            main.mount(scroll)
+            scroll.mount(Static("加载中…", id="content"))
+            # Now run the renderer
+            try:
+                content = self.query_one("#content", Static)
+                renderer = getattr(self, f"render_{self.current_mode}", None)
+                if renderer is None:
+                    content.update(f"模式 {self.current_mode} 暂未实现")
+                    return
+                renderer(content)
+            except Exception as e:
+                content.update(f"[red]渲染出错: {e}[/]")
 
     def refresh_entries(self) -> None:
         self.entries = scan_folder(self.folder)
 
-    # ── 0 首页 ──────────────────────────────────────
+    # ── 0 首页 (rendered by HomeView widget) ──────────────────────
 
     def render_home(self, target: Static) -> None:
-        self.refresh_entries()
-        today_str = date_cls.today().isoformat()
-        weekday = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][date_cls.today().weekday()]
-        today_e = today_entry(self.entries)
-
-        lines: list[str] = []
-
-        # Header
-        lines.append(f"[bold {AMBER}]{STAR} 拾光[/]  [dim]·[/]  [bold {AMBER_SOFT}]{today_str} {weekday}[/]")
-        lines.append(f"[dim]{self.folder}[/]")
-        lines.append("")
-
-        # Quick stats — 4 numbers in a row (rich markup)
-        n = len(self.entries)
-        if today_e:
-            today_status = f"[{AMBER}]已写[/]"
-        else:
-            today_status = f"[{WARM_GRAY}]未写[/]"
-        # 7-day count
-        from datetime import timedelta
-        seven_ago = date_cls.today() - timedelta(days=7)
-        week_count = sum(1 for e in self.entries if e.date >= seven_ago)
-        # total words
-        total_words = sum(_word_count(e.body) for e in self.entries)
-
-        lines.append(f"  [dim]──────[/]  [dim]概览[/]")
-        lines.append("")
-        lines.append(f"    全部       最近 7 天     今天       字数")
-        lines.append(f"   [{AMBER} bold]{n:>4}[/]      [{AMBER} bold]{week_count:>4}[/]      {today_status}      [{AMBER} bold]{total_words:>6,}[/]")
-        lines.append("")
-
-        # Recent entries
-        lines.append(f"  [dim]──────[/]  [dim]最近 5 篇[/]")
-        lines.append("")
-        if not self.entries:
-            lines.append(f"    [dim]还没有日记。按 1 进入编辑 tab 新建。[/]")
-        else:
-            for e in self.entries[:5]:
-                title = e.title[:30] if e.title else "无标题"
-                date_str = e.date.isoformat()
-                meta_parts = []
-                if e.frontmatter.mood is not None:
-                    meta_parts.append(f"m [{e.frontmatter.mood}]")
-                if e.frontmatter.weather:
-                    meta_parts.append(e.frontmatter.weather)
-                if e.frontmatter.tags:
-                    meta_parts.append(" ".join(f"#{t}" for t in e.frontmatter.tags[:3]))
-                meta = f"  [dim]{' · '.join(meta_parts)}[/]" if meta_parts else ""
-                lines.append(f"    [{AMBER}]{date_str}[/]  [bold {AMBER_SOFT}]{title}[/]{meta}")
-        lines.append("")
-
-        # Quick actions
-        lines.append(f"  [dim]──────[/]  [dim]快捷操作[/]")
-        lines.append("")
-        lines.append(f"    [{AMBER}]1[/] 编辑   [dim]— 列表 + 新建 + 编辑[/]")
-        lines.append(f"    [{AMBER}]2[/] 记录   [dim]— 全部日记浏览 + 搜索[/]")
-        lines.append(f"    [{AMBER}]3[/] 报表   [dim]— 数据统计 + 趋势 + 字云[/]")
-        lines.append("")
-
-        lines.append(f"  [dim]────────  按 0-3 切换 · ? 帮助 · q 退出[/]")
-
-        target.update("\n".join(lines))
+        # Unused — HomeView handles the home screen.
+        pass
 
     # ── 1 编辑 ──────────────────────────────────────
 
@@ -487,6 +472,211 @@ class HelpScreen(Screen):
 # ── 注册 + 入口 ──────────────────────────────────────
 
 ShiGuangApp.SCREENS = {"help": HelpScreen}
+
+
+# ── 首页 Widget ──────────────────────────────────────
+
+class HomeView(Container):
+    """The centered home screen: glow + logo + 3 menu items.
+
+    The 'glow' is faked with concentric rings of Unicode block
+    characters in dim→bright gradient, drawn behind the logo.
+    The menu items are 3 focusable buttons that switch the app's
+    mode on Enter.
+    """
+
+    DEFAULT_CSS = f"""
+    HomeView {{
+        align: center middle;
+        height: 1fr;
+    }}
+    #home-stack {{
+        width: 70;
+        height: auto;
+        align: center middle;
+    }}
+    #glow {{
+        align: center middle;
+        width: 100%;
+        height: 7;
+        color: {AMBER_DEEP};
+    }}
+    #logo {{
+        align: center middle;
+        width: 100%;
+        height: 7;
+        color: {AMBER};
+    }}
+    #title {{
+        align: center middle;
+        width: 100%;
+        height: 1;
+        margin-top: 1;
+    }}
+    #subtitle {{
+        align: center middle;
+        width: 100%;
+        height: 1;
+        margin-bottom: 1;
+    }}
+    #menu {{
+        align: center middle;
+        width: 40;
+        height: auto;
+    }}
+    .menu-item {{
+        width: 36;
+        height: 3;
+        content-align: center middle;
+        margin: 1 0;
+        background: #1F1A16;
+        border: round {AMBER_DEEP};
+        color: {AMBER_SOFT};
+    }}
+    .menu-item:hover {{
+        background: #2A201A;
+        border: round {AMBER};
+        color: {AMBER};
+        text-style: bold;
+    }}
+    .menu-item:focus {{
+        background: #2A201A;
+        border: round {AMBER};
+        color: {AMBER};
+        text-style: bold;
+    }}
+    #footer-hint {{
+        align: center middle;
+        width: 100%;
+        height: 1;
+        margin-top: 2;
+    }}
+    """
+
+    def __init__(self, app: "ShiGuangApp") -> None:
+        super().__init__(id="home-screen")
+        self._app_ref = app
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="home-stack"):
+            # Glow rings (faked halo behind logo)
+            yield Static(self._render_glow_lines(), id="glow")
+            # Logo (open book + moon, multi-color)
+            yield Static(self._render_logo_lines(), id="logo")
+            # Title + subtitle
+            yield Static(
+                f"[bold {AMBER}]拾  光[/]",
+                id="title"
+            )
+            yield Static(
+                f"[{AMBER_SOFT}]AfterGlow · TUI v{__version__}[/]",
+                id="subtitle"
+            )
+            # Menu items
+            with Vertical(id="menu"):
+                yield Button(
+                    f"▣  数据面板",
+                    id="menu-stats",
+                    classes="menu-item"
+                )
+                yield Button(
+                    f"✎  创作笔记",
+                    id="menu-edit",
+                    classes="menu-item"
+                )
+                yield Button(
+                    f"◐  洞察笔记",
+                    id="menu-browse",
+                    classes="menu-item"
+                )
+
+            # Footer hint
+            yield Static(
+                f"[dim]  {self._app_ref.folder}  ·  ↑↓ 选择 · Enter 进入 · ? 帮助 · q 退出[/]",
+                id="footer-hint"
+            )
+
+    # ── Render helpers ──────────────────────────────────────
+
+    def _render_glow_lines(self) -> str:
+        """Render concentric rings as multi-line glow.
+
+        Width matches the logo (20 cols), and we draw 3-4 rows
+        of progressively-dimmer characters above and below the
+        center.
+        """
+        width = 20
+        center = width // 2
+        # Each line: characters at distance d from center
+        # Use: closer = brighter + denser
+        # Distance 0: ✦
+        # Distance 1-2: • (dots)
+        # Distance 3-5: ▓ (block)
+        # Distance 6-9: ▒ (block)
+        # Distance 10+: space
+        lines = []
+        for d in [9, 6, 3]:
+            row = [" "] * width
+            for x in range(width):
+                dist = abs(x - center)
+                if dist == d:
+                    row[x] = "▒"
+                elif dist == d - 1:
+                    row[x] = "░"
+            lines.append("".join(row))
+        # Center line: brighter
+        row = [" "] * width
+        for x in range(width):
+            dist = abs(x - center)
+            if dist <= 1:
+                row[x] = "▓"
+            elif dist == 2:
+                row[x] = "▒"
+        lines.append("".join(row))
+        # Below
+        for d in [3, 6, 9]:
+            row = [" "] * width
+            for x in range(width):
+                dist = abs(x - center)
+                if dist == d:
+                    row[x] = "▒"
+                elif dist == d - 1:
+                    row[x] = "░"
+            lines.append("".join(row))
+        # Colorize: closer to center = brighter
+        out: list[str] = []
+        for i, line in enumerate(lines):
+            dist_from_center = abs(i - 3)   # 3 is the brightest line
+            if dist_from_center == 0:
+                color = AMBER
+            elif dist_from_center == 1:
+                color = AMBER_DEEP
+            elif dist_from_center == 2:
+                color = "#5A4F46"
+            else:
+                color = "#3A322C"
+            out.append(f"[{color}]{line}[/]")
+        return "\n".join(out)
+
+    def _render_logo_lines(self) -> str:
+        """Render the book + moon mark with rich colors per character."""
+        return render_logo(
+            amber=AMBER,
+            amber_soft=AMBER_SOFT,
+            amber_deep=AMBER_DEEP,
+            dim="#5A4F46"
+        )
+
+    # ── Menu actions ──────────────────────────────────────
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        bid = event.button.id
+        if bid == "menu-stats":
+            self._app_ref.action_mode("stats")
+        elif bid == "menu-edit":
+            self._app_ref.action_mode("edit")
+        elif bid == "menu-browse":
+            self._app_ref.action_mode("browse")
 
 
 def main() -> None:
