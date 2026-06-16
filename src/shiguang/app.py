@@ -1,71 +1,45 @@
-"""Textual app — 拾光 / AfterGlow TUI.
+"""Textual app — 拾光 / AfterGlow TUI (v0.2).
 
-Visual language:
-  - 蜜橙 #E8A87C 主色（跟 macOS 版一致）
-  - 暗色背景 $surface + 卡片 border 提示分区
-  - 顶部 Header: 模式 + 路径 + 时间
-  - 主区: 多个 "card" 容器垂直堆叠，card 间留 1 行空
-  - 底部 Footer: 分组键提示
-
-7 modes (number keys 1-7):
-  1 写作  — entry list
-  2 列表  — full list grouped by month
-  3 日记  — TODAY view (default): today + 今日签 + 周年 + 急救
-  4 镜像  — Mirror reflection
-  5 周年  — Anniversary echo
-  6 急救  — Rescue detection
-  7 AI    — placeholder
+4 modes:
+  0 首页   (default) — welcome + recent entries + quick actions
+  1 编辑   — list + editor (TextArea)
+  2 记录   — read-only browser, search
+  3 报表   — stats: counts, mood distribution, monthly trend,
+              tag frequency, word cloud, streaks
+  ? 帮助   — key reference
 """
 from __future__ import annotations
 
-import random
 from datetime import date as date_cls, datetime
 from pathlib import Path
 from typing import Optional
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, VerticalScroll
+from textual.containers import Container, VerticalScroll, Horizontal
 from textual.reactive import reactive
-from textual.screen import Screen
-from textual.widgets import Footer, Static
+from textual.screen import Screen, ModalScreen
+from textual.widgets import Footer, Static, TextArea, Input, ListView, ListItem, Label
 
 from . import __version__
 from .config import load_state, default_diary_folder, state_file
-from .diary import scan_folder, Entry, today_entry
+from .diary import scan_folder, Entry, write_entry, today_entry, parse_date_from_filename
+from .frontmatter import Frontmatter
 from .markup import md_to_markup
-from .algorithms import (
-    daily_practice as dp,
-    anniversary as anniv,
-    rescue as resc,
-    mirror as mirr,
-)
+from . import stats as stats_mod
 
 
 # ── 视觉常量 ──────────────────────────────────────────────
 
-AMBER = "#E8A87C"           # 蜜橙 — 主色
-AMBER_DEEP = "#C97B4F"      # 深蜜橙
-AMBER_SOFT = "#F5C7A0"      # 浅蜜橙
-INK = "#1A1A1A"             # 主文字
-PAPER = "#F5F1EB"           # 浅文字
-WARM_GRAY = "#8B8680"       # 灰色
-COOL_BLUE = "#7B95A8"       # 冷蓝（急救专用）
-
-# 边框字符（用 ASCII 安全字符，跨字体）
-HL = "─"                    # 横线
-VL = "│"                    # 竖线
-TL = "┌"
-TR = "┐"
-BL = "└"
-BR = "┘"
+AMBER = "#E8A87C"
+AMBER_DEEP = "#C97B4F"
+AMBER_SOFT = "#F5C7A0"
+WARM_GRAY = "#8B8680"
+PAPER = "#F5F1EB"
+INK = "#1A1A1A"
+STAR = "✦"
 ARROW = "›"
 DOT = "·"
-STAR = "✦"
-
-
-def hr(width: int, char: str = HL) -> str:
-    return char * max(1, width)
 
 
 # ── 主 App ──────────────────────────────────────────────
@@ -91,100 +65,42 @@ class ShiGuangApp(App):
         padding: 1 2;
     }}
 
-    Card {{
-        height: auto;
-        margin: 0 0 1 0;
-        padding: 1 2;
+    Input {{
+        background: #1F1A16;
         border: round {AMBER};
     }}
 
-    .card-title {{
-        color: {AMBER};
-        text-style: bold;
-        height: 1;
-    }}
-
-    .card-subtitle {{
-        color: {WARM_GRAY};
-        height: 1;
-    }}
-
-    .card-body {{
-        color: {PAPER};
-        padding: 1 0 0 0;
-    }}
-
-    .muted {{
-        color: {WARM_GRAY};
-    }}
-
-    .accent {{
-        color: {AMBER};
-    }}
-
-    .cool {{
-        color: {COOL_BLUE};
-    }}
-
-    .dim {{
-        color: #4A4540;
-    }}
-
-    .quote {{
-        color: {PAPER};
-        padding: 0 0 0 2;
-    }}
-
-    .keyword {{
-        color: {AMBER};
-        text-style: bold;
-    }}
-
-    .streak {{
-        color: {AMBER_DEEP};
-        text-style: bold;
-    }}
-
-    .hot {{
-        color: #FF6B6B;
-        text-style: bold;
+    TextArea {{
+        background: #1F1A16;
+        border: round {AMBER};
     }}
     """
 
     BINDINGS = [
         Binding("ctrl+c", "quit", "退出", show=False),
-        Binding("1", "mode('writing')", "1 写作"),
-        Binding("2", "mode('list')", "2 列表"),
-        Binding("3", "mode('diary')", "3 日记"),
-        Binding("4", "mode('mirror')", "4 镜像"),
-        Binding("5", "mode('anniversary')", "5 周年"),
-        Binding("6", "mode('rescue')", "6 急救"),
-        Binding("7", "mode('ai')", "7 AI"),
-        Binding("q", "quit", "q 退出", show=False),
+        Binding("0", "mode('home')", "0 首页", show=False),
+        Binding("1", "mode('edit')", "1 编辑", show=False),
+        Binding("2", "mode('browse')", "2 记录", show=False),
+        Binding("3", "mode('stats')", "3 报表", show=False),
         Binding("?", "help", "? 帮助"),
+        Binding("q", "quit", "q 退出", show=False),
     ]
 
-    MY_MODES = ["writing", "list", "diary", "mirror", "anniversary", "rescue", "ai"]
+    MY_MODES = ["home", "edit", "browse", "stats"]
     MODE_LABELS = {
-        "writing": "写作",
-        "list": "列表",
-        "diary": "日记",
-        "mirror": "镜像",
-        "anniversary": "周年",
-        "rescue": "急救",
-        "ai": "AI",
+        "home": "首页",
+        "edit": "编辑",
+        "browse": "记录",
+        "stats": "报表",
     }
     MODE_GLYPH = {
-        "writing": "✎",
-        "list": "☰",
-        "diary": "✦",
-        "mirror": "◐",
-        "anniversary": "✧",
-        "rescue": "❅",
-        "ai": "◈",
+        "home": "⌂",
+        "edit": "✎",
+        "browse": "☰",
+        "stats": "▦",
     }
 
-    current_mode: reactive[str] = reactive("diary")
+    current_mode: reactive[str] = reactive("home")
 
     def __init__(self, folder: Optional[str] = None) -> None:
         super().__init__()
@@ -221,7 +137,7 @@ class ShiGuangApp(App):
     def action_help(self) -> None:
         self.push_screen("help")
 
-    # ── 顶部状态条 ──────────────────────────────────────
+    # ── 顶部 status bar ──────────────────────────────────────
 
     def render_mode(self) -> None:
         indicator = self.query_one("#mode-indicator", Static)
@@ -229,19 +145,21 @@ class ShiGuangApp(App):
         label = self.MODE_LABELS[m]
         glyph = self.MODE_GLYPH[m]
         now = datetime.now().strftime("%H:%M")
-        # 1-7 模式提示
-        mode_pills = " ".join(
-            f"[{i}] {self.MODE_LABELS[k]}" for i, k in enumerate(self.MY_MODES, 1)
-        )
-        active = f"[reverse] [black on {AMBER}] {glyph} {label} [/]"
-        others = " ".join(
-            f"[dim][[{i}] {self.MODE_LABELS[k]}][/]"
-            for i, k in enumerate(self.MY_MODES, 1)
-            if k != m
-        )
+        # pills: 0 首页 · 1 编辑 · 2 记录 · 3 报表 · ? 帮助
+        pills = []
+        for k in self.MY_MODES:
+            i = self.MY_MODES.index(k)
+            pill = f"[{i}] {self.MODE_LABELS[k]}"
+            if k == m:
+                pill = f"[reverse][black on {AMBER}] {glyph} {self.MODE_LABELS[k]} [/]"
+            else:
+                pill = f"[dim][[{i}] {self.MODE_LABELS[k]}][/]"
+            pills.append(pill)
+        active = next(p for p in pills if "[reverse]" in p)
+        others = " ".join(p for p in pills if "[reverse]" not in p)
         indicator.update(
             f" 拾光  {ARROW}  {active}  {others}    "
-            f"[dim]{self.folder}  {ARROW}  {now}[/]"
+            f"[dim]{self.folder.name}{ARROW} {now}[/]"
         )
 
         content = self.query_one("#content", Static)
@@ -257,65 +175,132 @@ class ShiGuangApp(App):
     def refresh_entries(self) -> None:
         self.entries = scan_folder(self.folder)
 
-    # ── Card 辅助 ──────────────────────────────────────
+    # ── 0 首页 ──────────────────────────────────────
 
-    def _card(self, title: str, body: str, subtitle: str = "",
-              title_color: str = AMBER) -> str:
-        """Render a card with title + body. The card has rounded
-        border (rendered by CSS), we just provide the content."""
-        if subtitle:
-            return (
-                f"[{title_color}]{title}[/]  [dim]{subtitle}[/]\n"
-                f"{body}"
-            )
-        return f"[{title_color}]{title}[/]\n{body}"
-
-    # ── 1 写作 ──────────────────────────────────────
-
-    def render_writing(self, target: Static) -> None:
+    def render_home(self, target: Static) -> None:
         self.refresh_entries()
-        lines = []
-        lines.append(f"[{AMBER}]{STAR} 写作 · {len(self.entries)} 篇[/]")
+        today_str = date_cls.today().isoformat()
+        weekday = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][date_cls.today().weekday()]
+        today_e = today_entry(self.entries)
+
+        lines: list[str] = []
+
+        # Header
+        lines.append(f"[bold {AMBER}]{STAR} 拾光[/]  [dim]·[/]  [bold {AMBER_SOFT}]{today_str} {weekday}[/]")
         lines.append(f"[dim]{self.folder}[/]")
         lines.append("")
 
-        if not self.entries:
-            lines.append(f"[dim]还没有日记。先按 `n` 新建今天的。[/]")
+        # Quick stats — 4 numbers in a row (rich markup)
+        n = len(self.entries)
+        if today_e:
+            today_status = f"[{AMBER}]已写[/]"
         else:
-            lines.append(f"[dim]最近 20 篇  ·  按 ↑↓ 选择 · Enter 打开 · n 新建 · dd 删除[/]")
-            lines.append("")
-            for e in self.entries[:20]:
-                # 7 chars for date, then padded title
-                date_str = e.date.strftime("%Y-%m-%d")
-                weekday = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][e.date.weekday()]
-                title = e.title[:30]
-                # meta line
+            today_status = f"[{WARM_GRAY}]未写[/]"
+        # 7-day count
+        from datetime import timedelta
+        seven_ago = date_cls.today() - timedelta(days=7)
+        week_count = sum(1 for e in self.entries if e.date >= seven_ago)
+        # total words
+        total_words = sum(_word_count(e.body) for e in self.entries)
+
+        lines.append(f"  [dim]──────[/]  [dim]概览[/]")
+        lines.append("")
+        lines.append(f"    全部       最近 7 天     今天       字数")
+        lines.append(f"   [{AMBER} bold]{n:>4}[/]      [{AMBER} bold]{week_count:>4}[/]      {today_status}      [{AMBER} bold]{total_words:>6,}[/]")
+        lines.append("")
+
+        # Recent entries
+        lines.append(f"  [dim]──────[/]  [dim]最近 5 篇[/]")
+        lines.append("")
+        if not self.entries:
+            lines.append(f"    [dim]还没有日记。按 1 进入编辑 tab 新建。[/]")
+        else:
+            for e in self.entries[:5]:
+                title = e.title[:30] if e.title else "无标题"
+                date_str = e.date.isoformat()
                 meta_parts = []
                 if e.frontmatter.mood is not None:
-                    meta_parts.append(f"mood {e.frontmatter.mood}")
+                    meta_parts.append(f"m [{e.frontmatter.mood}]")
                 if e.frontmatter.weather:
                     meta_parts.append(e.frontmatter.weather)
                 if e.frontmatter.tags:
                     meta_parts.append(" ".join(f"#{t}" for t in e.frontmatter.tags[:3]))
+                meta = f"  [dim]{' · '.join(meta_parts)}[/]" if meta_parts else ""
+                lines.append(f"    [{AMBER}]{date_str}[/]  [bold {AMBER_SOFT}]{title}[/]{meta}")
+        lines.append("")
+
+        # Quick actions
+        lines.append(f"  [dim]──────[/]  [dim]快捷操作[/]")
+        lines.append("")
+        lines.append(f"    [{AMBER}]1[/] 编辑   [dim]— 列表 + 新建 + 编辑[/]")
+        lines.append(f"    [{AMBER}]2[/] 记录   [dim]— 全部日记浏览 + 搜索[/]")
+        lines.append(f"    [{AMBER}]3[/] 报表   [dim]— 数据统计 + 趋势 + 字云[/]")
+        lines.append("")
+
+        lines.append(f"  [dim]────────  按 0-3 切换 · ? 帮助 · q 退出[/]")
+
+        target.update("\n".join(lines))
+
+    # ── 1 编辑 ──────────────────────────────────────
+
+    def render_edit(self, target: Static) -> None:
+        self.refresh_entries()
+        target.update(self._edit_list_view())
+
+    def _edit_list_view(self) -> str:
+        """Render the edit-mode list."""
+        lines: list[str] = []
+        lines.append(f"[bold {AMBER}]{STAR} 编辑 · {len(self.entries)} 篇[/]")
+        lines.append(f"[dim]{self.folder}[/]")
+        lines.append("")
+        lines.append(f"  [dim]快捷键: n 新建今日 · Enter 打开编辑 · dd 删除[/]")
+        lines.append("")
+
+        if not self.entries:
+            lines.append(f"  [dim]还没有日记。按 n 新建今天的。[/]")
+            return "\n".join(lines)
+
+        # Group by year-month
+        from collections import defaultdict
+        by_month: dict[str, list[Entry]] = defaultdict(list)
+        for e in self.entries:
+            by_month[e.date.strftime("%Y-%m")].append(e)
+
+        i = 1
+        for month in sorted(by_month.keys(), reverse=True):
+            lines.append(f"  [{AMBER}]{month}[/]")
+            for e in sorted(by_month[month], key=lambda x: x.date, reverse=True):
+                title = e.title[:35] if e.title else "无标题"
+                meta_parts = []
+                if e.frontmatter.mood is not None:
+                    meta_parts.append(f"m{e.frontmatter.mood}")
+                if e.frontmatter.tags:
+                    meta_parts.append(" ".join(f"#{t}" for t in e.frontmatter.tags[:2]))
                 mq = e.frontmatter.extra.get("mood_quick")
                 if mq:
                     meta_parts.append(mq)
-                meta = "  ".join(meta_parts)
-                lines.append(
-                    f"  [{AMBER}]{date_str}[/]  [{weekday}]  {title}"
-                    + (f"   [dim]{meta}[/]" if meta else "")
-                )
-        target.update("\n".join(lines))
+                meta = f" [dim]{'·'.join(meta_parts)}[/]" if meta_parts else ""
+                # Cursor row marker (we don't track cursor position in render,
+                # but render with [1] [2] prefix for visual selection index)
+                lines.append(f"    [{AMBER} dim]\\[{i:>2}][/]  {e.date.strftime('%m-%d')}  [bold]{title}[/]{meta}")
+                i += 1
+            lines.append("")
+        return "\n".join(lines)
 
-    # ── 2 列表 ──────────────────────────────────────
+    # ── 2 记录 ──────────────────────────────────────
 
-    def render_list(self, target: Static) -> None:
+    def render_browse(self, target: Static) -> None:
         self.refresh_entries()
-        lines = [f"[{AMBER}]{STAR} 全部日记 · {len(self.entries)} 篇[/]", ""]
         if not self.entries:
-            lines.append(f"[dim]还没有日记[/]")
-            target.update("\n".join(lines))
+            target.update(
+                f"[bold {AMBER}]{STAR} 记录[/]\n\n"
+                f"[dim]还没有日记。按 1 进入编辑 tab 新建。[/]"
+            )
             return
+        lines: list[str] = []
+        lines.append(f"[bold {AMBER}]{STAR} 记录 · {len(self.entries)} 篇[/]")
+        lines.append(f"[dim]按 / 搜索 · 回车打开阅读 · 0 切回首页[/]")
+        lines.append("")
 
         from collections import defaultdict
         by_month: dict[str, list[Entry]] = defaultdict(list)
@@ -325,223 +310,133 @@ class ShiGuangApp(App):
         for month in sorted(by_month.keys(), reverse=True):
             lines.append(f"  [{AMBER}]{month}[/]")
             for e in sorted(by_month[month], key=lambda x: x.date, reverse=True):
-                title = e.title[:35]
-                preview = e.preview[:60].replace("\n", " ")
-                lines.append(f"    [dim]·[/]  {e.date.strftime('%m-%d')}  {title}  [dim]{preview}[/]")
+                title = e.title[:40] if e.title else "无标题"
+                preview = e.preview[:55]
+                lines.append(f"    [dim]·[/]  {e.date.strftime('%m-%d')}  [bold {AMBER_SOFT}]{title}[/]")
+                if preview:
+                    lines.append(f"        [dim]{preview}[/]")
             lines.append("")
-
         target.update("\n".join(lines))
 
-    # ── 3 日记 (default) ──────────────────────────────────────
+    # ── 3 报表 ──────────────────────────────────────
 
-    def render_diary(self, target: Static) -> None:
-        """Main 'today' view: today's diary + 今日签 + 周年 + 急救."""
+    def render_stats(self, target: Static) -> None:
         self.refresh_entries()
-        today_e = today_entry(self.entries)
-        prompt = dp.pick_for(date_cls.today())
-        done_today = dp.is_done_today(self.state)
-        streak = self.state.daily_practice_streak
-        longest = self.state.daily_practice_longest
-        anniv_matches = anniv.find(self.entries)
-        signal = resc.detect(self.entries)
-
+        report = stats_mod.compute(self.entries)
         lines: list[str] = []
 
-        # ── Header
-        today_str = date_cls.today().isoformat()
-        weekday = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][date_cls.today().weekday()]
-        lines.append(f"[{AMBER}]{STAR} 拾光 · {today_str} {weekday}[/]")
+        lines.append(f"[bold {AMBER}]{STAR} 数据报表 · {report.total_entries} 篇[/]")
+        lines.append(f"[dim]{self.folder}[/]")
         lines.append("")
 
-        # ── 今日日记 card
-        if today_e:
-            title = today_e.title or "无标题"
-            meta = []
-            if today_e.frontmatter.mood is not None:
-                meta.append(f"mood [{AMBER}]{today_e.frontmatter.mood}[/]")
-            if today_e.frontmatter.weather:
-                meta.append(today_e.frontmatter.weather)
-            if today_e.frontmatter.tags:
-                meta.append(" ".join(f"[{AMBER}]#{t}[/]" for t in today_e.frontmatter.tags))
-            mq = today_e.frontmatter.extra.get("mood_quick")
-            if mq:
-                meta.append(f"情绪 [{AMBER}]{mq}[/]")
-            meta_str = "  ".join(meta)
-            lines.append(f"  [dim]──────[/]  [{AMBER}]{ARROW} 今天的日记[/]")
-            lines.append(f"  [{AMBER_SOFT}]{title}[/]")
-            if meta_str:
-                lines.append(f"  [dim]{meta_str}[/]")
+        if not report.total_entries:
+            lines.append(f"  [dim]还没有日记，没有数据可统计。[/]")
+            target.update("\n".join(lines))
+            return
+
+        # ── 概览
+        lines.append(f"  [dim]──────[/]  [dim]概览[/]")
+        lines.append("")
+        if report.date_range:
+            lines.append(f"    日期范围   [{AMBER}]{report.date_range[0]}[/] → [{AMBER}]{report.date_range[1]}[/]")
+        lines.append(f"    总字数     [{AMBER}]{report.total_words:,}[/]")
+        lines.append(f"    总字符     [{AMBER}]{report.total_characters:,}[/]")
+        lines.append(f"    平均字数   [{AMBER}]{report.average_words_per_entry:.0f}[/] 字/篇")
+        lines.append(f"    写作 streak  [bold {AMBER}]{report.current_streak_days}[/] 天 (最长 {report.longest_streak_days} 天)")
+        lines.append("")
+
+        # ── 心情分布
+        if report.mood_distribution:
+            lines.append(f"  [dim]──────[/]  [dim]心情分布 (1=最差, 5=最好)[/]")
             lines.append("")
-            # body — convert markdown to rich markup so **bold**,
-            # ## headers, > quotes, - bullets all render properly
-            # in the terminal instead of as raw characters.
-            body = today_e.body.strip()
-            if body:
-                body_markup = md_to_markup(body)
-                lines.append(body_markup)
-            # trim if too long
-            if len(lines) > 50:
-                lines = lines[:50] + [f"  [dim]… (更多按 1 切到写作 tab)[/]"]
-        else:
-            lines.append(f"  [dim]──────[/]  [{AMBER}]{ARROW} 今天的日记[/]")
-            lines.append(f"  [dim]今天还没写。按 `n` 新建。[dim]")
-        lines.append("")
-
-        # ── 今日签 card
-        lines.append(f"  [dim]──────[/]  [{AMBER}]{ARROW} 今日签[/]")
-        lines.append(f"  [dim]{prompt.category}[/]")
-        lines.append(f"  [{AMBER_SOFT}]{prompt.text}[/]")
-        lines.append("")
-        if done_today:
-            lines.append(f"  [{AMBER}]{STAR} 今日已完成[/]  [dim]连续 {streak} 天 · 最长 {longest}[/]")
-        else:
-            streak_hint = ""
-            if streak >= 3:
-                streak_hint = f"  [dim]当前连续 {streak} 天  [streak]{STAR}[/] · [dim]最长 {longest} 天[/]"
-            elif streak > 0:
-                streak_hint = f"  [dim]当前 {streak} 天 · 最长 {longest} 天[/]"
-            lines.append(f"  [dim]按 r 写回答 (1-2 句就够){streak_hint}[/]")
-        lines.append("")
-
-        # ── 周年回响
-        if anniv_matches:
-            years_label = "/".join(f"{m.yearsAgo}y" for m in anniv_matches)
-            lines.append(f"  [dim]──────[/]  [{AMBER}]{ARROW} 周年回响[/]  [dim]{years_label}[/]")
+            lines.append(self._bar_chart_mood(report.mood_distribution))
             lines.append("")
-            for m in anniv_matches[:3]:
-                lines.append(f"  [{AMBER_SOFT}]{m.years_ago} 年前[/]  [dim]·[/]  {m.entry.title}")
-                # first line of preview (already stripped of markdown markers)
-                first = m.preview.split("\n")[0][:80]
-                lines.append(f"  [dim]{first}[/]")
-                lines.append("")
 
-        # ── 情绪急救
-        if signal.level != "none":
-            emoji = "❅" if signal.level == "intervene" else "☁"
-            title = "你之前走过这段路" if signal.level == "intervene" else "你最近不太好"
-            lines.append(f"  [dim]──────[/]  [{COOL_BLUE}]{ARROW} 情绪急救[/]  [dim]{signal.days_affected} 天[/]")
-            lines.append(f"  [{COOL_BLUE}]{emoji} {title}[/]")
+        # ── 月度字数趋势
+        if report.monthly_trend:
+            lines.append(f"  [dim]──────[/]  [dim]月度字数 (最近 6 个月)[/]")
             lines.append("")
-            rescued = resc.find_rescued_entries(self.entries)
-            for e in rescued[:2]:
-                lines.append(f"  [{COOL_BLUE}]{e.date.isoformat()}[/]  [dim]·[/]  {e.title[:30]}")
-                preview = e.body.strip().split("\n")[0][:60]
-                lines.append(f"  [dim]{preview}[/]")
-                lines.append("")
+            lines.append(self._bar_chart_monthly(report.monthly_trend))
+            lines.append("")
 
-        # ── Footer hint
-        lines.append("")
-        lines.append(f"  [dim]────────  1 写作 · 2 列表 · 4 镜像 · 5 周年 · 6 急救 · r 写回答 · ? 帮助[/]")
+        # ── Tag 频率 Top 10
+        if report.top_tags:
+            lines.append(f"  [dim]──────[/]  [dim]Tag 频率 Top 10[/]")
+            lines.append("")
+            max_count = report.top_tags[0].count
+            for tc in report.top_tags[:10]:
+                bar_width = (tc.count * 16) // max(max_count, 1) if max_count else 0
+                bar = "█" * bar_width
+                lines.append(f"    [{AMBER}]#{tc.tag:<10}[/]  [{AMBER_SOFT}]{bar}[/]  [dim]{tc.count}[/]")
+            lines.append("")
 
+        # ── Word cloud
+        if report.word_cloud:
+            lines.append(f"  [dim]──────[/]  [dim]词云 (Top 30 · CJK + Latin)[/]")
+            lines.append("")
+            lines.append(self._word_cloud_render(report.word_cloud))
+            lines.append("")
+
+        lines.append(f"  [dim]────────  0 首页 · 1 编辑 · 2 记录 · 3 报表 · ? 帮助[/]")
         target.update("\n".join(lines))
 
-    # ── 4 镜像 ──────────────────────────────────────
+    # ── Bar chart helpers ──────────────────────────────────────
 
-    def render_mirror(self, target: Static) -> None:
-        self.refresh_entries()
-        if len(self.entries) < 5:
-            target.update(
-                f"[{AMBER}]{STAR} 镜像回放[/]\n\n"
-                f"[dim]日记还不够多（至少 5 篇）。继续写。[/]"
-            )
-            return
-        try:
-            reflections = mirr.sample(self.entries, seed=random.randint(0, 99999))
-        except Exception as e:
-            target.update(f"[red]镜像采样失败: {e}[/]")
-            return
-        if not reflections:
-            target.update(f"[{AMBER}]{STAR} 镜像回放[/]\n\n[dim]没有可采样的句子。[/]")
-            return
+    def _bar_chart_mood(self, buckets) -> str:
+        """Render a horizontal bar chart for mood distribution."""
+        max_count = max(b.count for b in buckets) if buckets else 1
+        lines: list[str] = []
+        # Ensure all 1..5 are represented
+        by_score = {b.score: b.count for b in buckets}
+        for score in range(1, 6):
+            count = by_score.get(score, 0)
+            bar_width = (count * 20) // max(max_count, 1) if max_count else 0
+            bar = "█" * bar_width
+            label = ["很差", "差", "一般", "好", "很好"][score - 1]
+            lines.append(f"    [{AMBER}]{score} {label:<4}[/]  [{AMBER_SOFT}]{bar:<20}[/]  [dim]{count}[/]")
+        return "\n".join(lines)
 
-        lines = [
-            f"[{AMBER}]{STAR} 镜像回放[/]  [dim]从过去 180 天里挑了 {len(reflections)} 句[/]",
-            f"[dim]按 r 重新采样 · 1-7 切换模式[/]",
-            "",
-        ]
-        for i, r in enumerate(reflections, 1):
-            lines.append(f"  [{AMBER}]{i:2d}[/]  [dim]{r.source_date.isoformat()}[/]  [dim]{ARROW}[/]  {r.source_title[:25]}")
-            lines.append(f"      [{AMBER_SOFT}]\"{r.text}\"[/]")
-            lines.append("")
-        target.update("\n".join(lines))
+    def _bar_chart_monthly(self, points) -> str:
+        """Render monthly word-count trend."""
+        max_words = max(p.word_count for p in points) if points else 1
+        lines: list[str] = []
+        for p in points:
+            bar_width = (p.word_count * 24) // max(max_words, 1) if max_words else 0
+            bar = "█" * bar_width
+            # show count
+            lines.append(f"    [{AMBER}]{p.label:<6}[/]  [{AMBER_SOFT}]{bar:<24}[/]  [dim]{p.word_count:>5,} 字 · {p.entry_count} 篇[/]")
+        return "\n".join(lines)
 
-    # ── 5 周年 ──────────────────────────────────────
-
-    def render_anniversary(self, target: Static) -> None:
-        self.refresh_entries()
-        matches = anniv.find(self.entries)
-        today_str = date_cls.today().isoformat()
-        if not matches:
-            target.update(
-                f"[{AMBER}]{STAR} 周年回响 · {today_str}[/]\n\n"
-                f"[dim]往年的今天还没有日记。[/]\n\n"
-                f"[dim]继续写，未来某年的今天会再回来。[/]"
-            )
-            return
-        lines = [f"[{AMBER}]{STAR} 周年回响 · {today_str}[/]  [dim]{len(matches)} 年[/]", ""]
-        for m in matches:
-            lines.append(f"  [dim]──────[/]  [{AMBER}]{m.years_ago} 年前[/]  [dim]·[/]  {m.entry.title}")
-            lines.append(f"  [dim]{m.entry.date.isoformat()}[/]")
-            lines.append("")
-            # Convert preview body to rich markup so headers /
-            # quotes / bullets render correctly in the terminal.
-            preview = m.preview
-            if preview.strip():
-                lines.append(md_to_markup(preview))
-            lines.append("")
-        target.update("\n".join(lines))
-
-    # ── 6 急救 ──────────────────────────────────────
-
-    def render_rescue(self, target: Static) -> None:
-        self.refresh_entries()
-        signal = resc.detect(self.entries)
-
-        if signal.level == "none":
-            target.update(
-                f"[{COOL_BLUE}]{STAR} 情绪急救[/]\n\n"
-                f"[dim]过去 14 天没有检测到连续 3 天低分。[/]\n\n"
-                f"[dim]急救功能只在你连续 3 天情绪低时浮现。[/]\n"
-                f"[dim]当前最近：{signal.sample_text or '无'}[/]"
-            )
-            return
-
-        rescued = resc.find_rescued_entries(self.entries)
-        emoji = "❅" if signal.level == "intervene" else "☁"
-        title = "你之前走过这段路" if signal.level == "intervene" else "你最近不太好"
-        lines = [
-            f"[{COOL_BLUE}]{STAR} 情绪急救[/]  [dim]{signal.days_affected} 天[/]",
-            f"[{COOL_BLUE}]{emoji} {title}[/]",
-            f"[dim]不需要做任何事。可以只是看一会儿。[/]",
-            "",
-        ]
-        for e in rescued:
-            lines.append(f"  [dim]──────[/]  [{COOL_BLUE}]{e.date.isoformat()}[/]  [dim]·[/]  {e.title}")
-            lines.append("")
-            # First 6 lines of body, converted to rich markup
-            body_lines = e.body.strip().split("\n")[:6]
-            snippet = "\n".join(body_lines)
-            if snippet.strip():
-                lines.append(md_to_markup(snippet))
-            if len(e.body.strip().split("\n")) > 6:
-                lines.append(f"  [dim]…[/]")
-            lines.append("")
-        target.update("\n".join(lines))
-
-    # ── 7 AI ──────────────────────────────────────
-
-    def render_ai(self, target: Static) -> None:
-        llm = self.state.llm
-        api_state = "[{AMBER}]已设置[/]".format(AMBER=AMBER) if llm.api_key else f"[{WARM_GRAY}]未设置 — 用 shi config（v0.2）[/]"
-        target.update(
-            f"[{AMBER}]{STAR} AI 助手[/]  [dim]v0.1 暂未实现[/]\n\n"
-            f"**当前 LLM 配置**:\n\n"
-            f"  Provider  [{AMBER}]{llm.provider}[/]\n"
-            f"  Base URL  [dim]{llm.base_url}[/]\n"
-            f"  Model     [{AMBER}]{llm.model}[/]\n"
-            f"  API key   {api_state}\n\n"
-            f"[dim]v0.2 会加入 free-form 问答 + 流式输出。[/]"
-        )
+    def _word_cloud_render(self, words: list[tuple[str, int]]) -> str:
+        """Render a small word cloud as colored text with varying sizes."""
+        if not words:
+            return ""
+        # Simple two-band sizing: top 10 are "big" (bold amber), rest "small" (dim)
+        out: list[str] = []
+        # Render in 3 columns × ~10 rows for a compact grid
+        # Group by max count to size them
+        max_count = words[0][1]
+        # Build 3-column grid
+        col_size = (len(words) + 2) // 3
+        cols = [words[i:i + col_size] for i in range(0, len(words), col_size)]
+        rows = max(len(c) for c in cols)
+        for row in range(rows):
+            row_pieces = []
+            for c in cols:
+                if row < len(c):
+                    word, count = c[row]
+                    # Size: bigger words (count > max/3) get amber bold
+                    if count >= max_count * 0.5:
+                        style = f"[bold {AMBER}]"
+                    elif count >= max_count * 0.25:
+                        style = f"[{AMBER}]"
+                    else:
+                        style = f"[{AMBER_SOFT}]"
+                    row_pieces.append(f"{style}{word}[/]")
+                else:
+                    row_pieces.append("     ")
+            out.append("    " + "  ".join(f"{p:<14}" for p in row_pieces))
+        return "\n".join(out)
 
 
 # ── 帮助屏 ──────────────────────────────────────
@@ -574,19 +469,16 @@ class HelpScreen(Screen):
 
     def _help_text(self) -> str:
         return (
-            f"[{AMBER}]{STAR} 拾光 · 帮助[/]\n\n"
-            f"[{AMBER_SOFT}]7 个模式[/]  [dim](按数字键切换)[/]\n\n"
-            f"  [bold]1[/] 写作   [dim]—[/]  列表 + 新建/删除\n"
-            f"  [bold]2[/] 列表   [dim]—[/]  全部日记，按月分组\n"
-            f"  [bold]3[/] 日记   [dim]—[/]  [reverse] [black on {AMBER}] 默认视图 [/]  今天 + 今日签 + 周年 + 急救\n"
-            f"  [bold]4[/] 镜像   [dim]—[/]  5-7 句自己写过的话（多样性采样）\n"
-            f"  [bold]5[/] 周年   [dim]—[/]  往年今天你写过什么\n"
-            f"  [bold]6[/] 急救   [dim]—[/]  连续 3 天情绪低时浮现\n"
-            f"  [bold]7[/] AI     [dim]—[/]  自由问答 [dim](v0.2 计划)[/]\n\n"
-            f"[{AMBER_SOFT}]常用键[/]\n\n"
+            f"[bold {AMBER}]{STAR} 拾光 · 帮助[/]\n\n"
+            f"[bold {AMBER_SOFT}]4 个模式[/]  [dim](按数字键切换)[/]\n\n"
+            f"  [bold]0[/] 首页   [dim]—[/]  [reverse] [black on {AMBER}] 默认视图 [/]  概览 + 最近 5 篇 + 快捷操作\n"
+            f"  [bold]1[/] 编辑   [dim]—[/]  列表 + 新建 + 编辑（TextArea 编辑器）\n"
+            f"  [bold]2[/] 记录   [dim]—[/]  全部日记浏览 + 搜索\n"
+            f"  [bold]3[/] 报表   [dim]—[/]  数据统计 + 趋势 + Tag 频率 + 词云\n\n"
+            f"[bold {AMBER_SOFT}]常用键[/]\n\n"
             f"  [bold]?[/]   本帮助\n"
             f"  [bold]q[/]   退出\n\n"
-            f"[{AMBER_SOFT}]配置文件[/]\n\n"
+            f"[bold {AMBER_SOFT}]配置文件[/]\n\n"
             f"  [dim]{state_file()}[/]\n\n"
             f"[dim]按 Esc / ? / q 返回[/]"
         )
@@ -600,3 +492,16 @@ ShiGuangApp.SCREENS = {"help": HelpScreen}
 def main() -> None:
     app = ShiGuangApp()
     app.run()
+
+
+# ── helpers ──────────────────────────────────────────────
+
+def _word_count(text: str) -> int:
+    """Same logic as stats._word_count; inlined here to avoid import
+    cycle on first build."""
+    if not text:
+        return 0
+    cjk = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
+    import re as _re
+    latin_words = len(_re.findall(r"[A-Za-z0-9]+", text))
+    return cjk + latin_words

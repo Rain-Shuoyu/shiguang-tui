@@ -1,17 +1,17 @@
-"""`shi --sanity-check` — non-TUI smoke test."""
+"""`shi --sanity-check` — non-TUI smoke test.
+
+v0.2: dropped the algorithm-heavy sanity check (mirror /
+anniversary / rescue / daily_practice were removed). Now it
+just verifies that the diary folder can be scanned + stats
+can be computed.
+"""
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 from .config import default_diary_folder
 from .diary import scan_folder
-from .algorithms import (
-    daily_practice as dp,
-    anniversary as anniv,
-    rescue as resc,
-    mirror as mirr,
-)
+from . import stats as stats_mod
 
 
 def run_sanity_check(folder_arg: str | None) -> int:
@@ -25,37 +25,13 @@ def run_sanity_check(folder_arg: str | None) -> int:
     if not entries:
         return 0
 
-    # Today
-    from datetime import date as date_cls
-    today = date_cls.today()
-    p = dp.pick_for(today)
-    print(f"  ✓ Today's daily practice prompt: #{p.id} ({p.category}) — {p.text[:40]}…")
-
-    # Anniversary
-    matches = anniv.find(entries, today)
-    if matches:
-        print(f"  ✓ Anniversary: {len(matches)} matches for {today.isoformat()}")
-        for m in matches[:3]:
-            print(f"      {m.years_ago}y ago: {m.entry.title}")
-    else:
-        print(f"  - No anniversary match for {today.isoformat()}")
-
-    # Rescue
-    signal = resc.detect(entries, today)
-    print(f"  ✓ Rescue signal: {signal.level} (days={signal.days_affected})")
-
-    # Mirror
-    if len(entries) >= 5:
-        try:
-            reflections = mirr.sample(entries, seed=42)
-            print(f"  ✓ Mirror: {len(reflections)} reflections")
-            for r in reflections[:3]:
-                print(f"      {r.source_date.isoformat()}: {r.text[:60]}…")
-        except Exception as e:
-            print(f"  ✗ Mirror failed: {e}")
-    else:
-        print(f"  - Mirror skipped (need ≥5 entries, have {len(entries)})")
-
+    report = stats_mod.compute(entries)
+    print(f"  ✓ Stats: {report.total_words} words, "
+          f"streak {report.current_streak_days}/{report.longest_streak_days}, "
+          f"{len(report.mood_distribution)} mood buckets")
+    if report.word_cloud:
+        top3 = ", ".join(f"{w}({c})" for w, c in report.word_cloud[:3])
+        print(f"  ✓ Word cloud top 3: {top3}")
     print()
     print("All checks passed.")
     return 0
