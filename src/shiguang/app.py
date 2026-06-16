@@ -610,7 +610,7 @@ class HomeView(Container):
     def compose(self) -> ComposeResult:
         with Vertical(id="home-stack"):
             # Giant 'A' + glow halo
-            yield Static(render_home_header(letter="A"), id="logo-block")
+            yield Static(render_home_header(), id="logo-block")
             # Title + subtitle
             yield Static(
                 f"[bold {AMBER}]拾  光[/]",
