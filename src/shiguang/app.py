@@ -27,7 +27,7 @@ from .diary import scan_folder, Entry, write_entry, today_entry, parse_date_from
 from .frontmatter import Frontmatter
 from .markup import md_to_markup
 from . import stats as stats_mod
-from .logo import render_logo, render_glow_rings
+from .logo import render_home_header
 
 
 # ── 视觉常量 ──────────────────────────────────────────────
@@ -113,12 +113,26 @@ class ShiGuangApp(App):
     BINDINGS = [
         Binding("ctrl+c", "quit", "退出", show=False),
         Binding("0", "mode('home')", "0 首页", show=False),
-        Binding("1", "mode('edit')", "1 编辑", show=False),
-        Binding("2", "mode('browse')", "2 记录", show=False),
-        Binding("3", "mode('stats')", "3 报表", show=False),
+        # Number keys map directly to menu items in HomeView,
+        # NOT to mode names. The mapping is:
+        #   1 = stats (1st menu item)    2 = edit (2nd)    3 = browse (3rd)
+        # When NOT in home, these route to the same-numbered mode
+        # (1=edit, 2=browse, 3=stats) — same as before.
+        Binding("1", "menu_pick(0)", "1 数据面板", show=False),
+        Binding("2", "menu_pick(1)", "2 创作笔记", show=False),
+        Binding("3", "menu_pick(2)", "3 洞察笔记", show=False),
+        # Arrow / vim keys: only used in home mode (no-op elsewhere)
+        Binding("up", "home_menu_up", show=False),
+        Binding("down", "home_menu_down", show=False),
+        Binding("j", "home_menu_down", show=False),
+        Binding("k", "home_menu_up", show=False),
+        Binding("enter", "home_menu_enter", show=False),
         Binding("?", "help", "? 帮助"),
         Binding("q", "quit", "q 退出", show=False),
     ]
+
+    def action_help(self) -> None:
+        self.push_screen("help")
 
     MY_MODES = ["home", "edit", "browse", "stats"]
     MODE_LABELS = {
@@ -169,8 +183,51 @@ class ShiGuangApp(App):
         self.current_mode = mode
         self.render_mode()
 
-    def action_help(self) -> None:
-        self.push_screen("help")
+    def action_menu_pick(self, idx: int) -> None:
+        """Press `1`/`2`/`3` — picks the idx-th menu item.
+
+        - In home mode: activates the menu item (stats/edit/browse
+          in display order).
+        - In other modes: shortcuts to the corresponding mode by
+          number. Same numbers as the menu (1=stats, 2=edit, 3=browse)
+          — but in non-home modes the numbers are still shown in the
+          status bar pills, so this is intuitive.
+        """
+        menu_modes = ["stats", "edit", "browse"]
+        if not (0 <= idx < len(menu_modes)):
+            return
+        target_mode = menu_modes[idx]
+        if self.current_mode == "home":
+            try:
+                home = self.query_one(HomeView)
+                home.action_menu_activate(idx)
+                return
+            except Exception:
+                pass
+        # Not in home — direct mode switch
+        self.current_mode = target_mode
+        self.render_mode()
+
+    def action_home_menu_up(self) -> None:
+        if self.current_mode == "home":
+            try:
+                self.query_one(HomeView).action_menu_up()
+            except Exception:
+                pass
+
+    def action_home_menu_down(self) -> None:
+        if self.current_mode == "home":
+            try:
+                self.query_one(HomeView).action_menu_down()
+            except Exception:
+                pass
+
+    def action_home_menu_enter(self) -> None:
+        if self.current_mode == "home":
+            try:
+                self.query_one(HomeView).action_menu_enter()
+            except Exception:
+                pass
 
     # ── 顶部 status bar ──────────────────────────────────────
 
@@ -477,12 +534,14 @@ ShiGuangApp.SCREENS = {"help": HelpScreen}
 # ── 首页 Widget ──────────────────────────────────────
 
 class HomeView(Container):
-    """The centered home screen: glow + logo + 3 menu items.
+    """The centered home screen: giant 'A' logo + glow halo + 3
+    menu lines.
 
-    The 'glow' is faked with concentric rings of Unicode block
-    characters in dim→bright gradient, drawn behind the logo.
-    The menu items are 3 focusable buttons that switch the app's
-    mode on Enter.
+    Keyboard-only navigation (no mouse, no clickable buttons):
+      - `1` / `2` / `3` for direct menu selection
+      - `↑` / `↓` (or `j` / `k`) to move the cursor between menu items
+      - `Enter` / `→` / `l` to enter the highlighted item
+      - `?` for help, `q` to quit
     """
 
     DEFAULT_CSS = f"""
@@ -495,17 +554,10 @@ class HomeView(Container):
         height: auto;
         align: center middle;
     }}
-    #glow {{
+    #logo-block {{
         align: center middle;
         width: 100%;
-        height: 7;
-        color: {AMBER_DEEP};
-    }}
-    #logo {{
-        align: center middle;
-        width: 100%;
-        height: 7;
-        color: {AMBER};
+        height: 9;
     }}
     #title {{
         align: center middle;
@@ -524,27 +576,6 @@ class HomeView(Container):
         width: 40;
         height: auto;
     }}
-    .menu-item {{
-        width: 36;
-        height: 3;
-        content-align: center middle;
-        margin: 1 0;
-        background: #1F1A16;
-        border: round {AMBER_DEEP};
-        color: {AMBER_SOFT};
-    }}
-    .menu-item:hover {{
-        background: #2A201A;
-        border: round {AMBER};
-        color: {AMBER};
-        text-style: bold;
-    }}
-    .menu-item:focus {{
-        background: #2A201A;
-        border: round {AMBER};
-        color: {AMBER};
-        text-style: bold;
-    }}
     #footer-hint {{
         align: center middle;
         width: 100%;
@@ -553,130 +584,96 @@ class HomeView(Container):
     }}
     """
 
+    # 3 menu items, in display order. The first one is the
+    # initial cursor position.
+    MENU_ITEMS = [
+        ("stats",  "1", "数据面板"),
+        ("edit",   "2", "创作笔记"),
+        ("browse", "3", "洞察笔记"),
+    ]
+
+    BINDINGS = [
+        Binding("1", "menu_activate(0)", show=False),
+        Binding("2", "menu_activate(1)", show=False),
+        Binding("3", "menu_activate(2)", show=False),
+        Binding("up,j", "menu_up", show=False),
+        Binding("down,k", "menu_down", show=False),
+        Binding("enter,right,l", "menu_enter", show=False),
+    ]
+
+    selected: reactive[int] = reactive(0)
+
     def __init__(self, app: "ShiGuangApp") -> None:
         super().__init__(id="home-screen")
         self._app_ref = app
 
     def compose(self) -> ComposeResult:
         with Vertical(id="home-stack"):
-            # Glow rings (faked halo behind logo)
-            yield Static(self._render_glow_lines(), id="glow")
-            # Logo (open book + moon, multi-color)
-            yield Static(self._render_logo_lines(), id="logo")
+            # Giant 'A' + glow halo
+            yield Static(render_home_header(letter="A"), id="logo-block")
             # Title + subtitle
             yield Static(
                 f"[bold {AMBER}]拾  光[/]",
                 id="title"
             )
             yield Static(
-                f"[{AMBER_SOFT}]AfterGlow · TUI v{__version__}[/]",
+                f"[{AMBER_SOFT}]AfterGlow · v{__version__}[/]",
                 id="subtitle"
             )
-            # Menu items
-            with Vertical(id="menu"):
-                yield Button(
-                    f"▣  数据面板",
-                    id="menu-stats",
-                    classes="menu-item"
-                )
-                yield Button(
-                    f"✎  创作笔记",
-                    id="menu-edit",
-                    classes="menu-item"
-                )
-                yield Button(
-                    f"◐  洞察笔记",
-                    id="menu-browse",
-                    classes="menu-item"
-                )
-
+            # 3 menu lines, with cursor (▸) on the selected one
+            yield Static(self._render_menu(), id="menu")
             # Footer hint
             yield Static(
-                f"[dim]  {self._app_ref.folder}  ·  ↑↓ 选择 · Enter 进入 · ? 帮助 · q 退出[/]",
+                f"[dim]  {self._app_ref.folder}  ·  1-3 直接选 · ↑↓ 移动 · Enter 进入 · ? 帮助 · q 退出[/]",
                 id="footer-hint"
             )
 
-    # ── Render helpers ──────────────────────────────────────
-
-    def _render_glow_lines(self) -> str:
-        """Render concentric rings as multi-line glow.
-
-        Width matches the logo (20 cols), and we draw 3-4 rows
-        of progressively-dimmer characters above and below the
-        center.
-        """
-        width = 20
-        center = width // 2
-        # Each line: characters at distance d from center
-        # Use: closer = brighter + denser
-        # Distance 0: ✦
-        # Distance 1-2: • (dots)
-        # Distance 3-5: ▓ (block)
-        # Distance 6-9: ▒ (block)
-        # Distance 10+: space
+    def _render_menu(self) -> str:
         lines = []
-        for d in [9, 6, 3]:
-            row = [" "] * width
-            for x in range(width):
-                dist = abs(x - center)
-                if dist == d:
-                    row[x] = "▒"
-                elif dist == d - 1:
-                    row[x] = "░"
-            lines.append("".join(row))
-        # Center line: brighter
-        row = [" "] * width
-        for x in range(width):
-            dist = abs(x - center)
-            if dist <= 1:
-                row[x] = "▓"
-            elif dist == 2:
-                row[x] = "▒"
-        lines.append("".join(row))
-        # Below
-        for d in [3, 6, 9]:
-            row = [" "] * width
-            for x in range(width):
-                dist = abs(x - center)
-                if dist == d:
-                    row[x] = "▒"
-                elif dist == d - 1:
-                    row[x] = "░"
-            lines.append("".join(row))
-        # Colorize: closer to center = brighter
-        out: list[str] = []
-        for i, line in enumerate(lines):
-            dist_from_center = abs(i - 3)   # 3 is the brightest line
-            if dist_from_center == 0:
-                color = AMBER
-            elif dist_from_center == 1:
-                color = AMBER_DEEP
-            elif dist_from_center == 2:
-                color = "#5A4F46"
+        for i, (mode, key, label) in enumerate(self.MENU_ITEMS):
+            if i == self.selected:
+                # Selected: bright amber + cursor
+                lines.append(
+                    f"  [reverse] [black on {AMBER}]   ▸  {key}  {label}    [/]"
+                )
             else:
-                color = "#3A322C"
-            out.append(f"[{color}]{line}[/]")
-        return "\n".join(out)
+                # Not selected: dimmer
+                lines.append(
+                    f"     [dim]   {key}  {label}    [/]"
+                )
+        return "\n".join(lines)
 
-    def _render_logo_lines(self) -> str:
-        """Render the book + moon mark with rich colors per character."""
-        return render_logo(
-            amber=AMBER,
-            amber_soft=AMBER_SOFT,
-            amber_deep=AMBER_DEEP,
-            dim="#5A4F46"
-        )
+    def on_mount(self) -> None:
+        # Re-render the menu whenever the selection changes.
+        self.watch(self, "selected", self._on_selection_change)
 
-    # ── Menu actions ──────────────────────────────────────
+    def _on_selection_change(self, _old, _new) -> None:
+        try:
+            menu_widget = self.query_one("#menu", Static)
+            menu_widget.update(self._render_menu())
+        except Exception:
+            pass
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        bid = event.button.id
-        if bid == "menu-stats":
-            self._app_ref.action_mode("stats")
-        elif bid == "menu-edit":
-            self._app_ref.action_mode("edit")
-        elif bid == "menu-browse":
-            self._app_ref.action_mode("browse")
+    # ── Actions ──────────────────────────────────────
+
+    def action_menu_activate(self, idx: int) -> None:
+        """`1` / `2` / `3` direct activation."""
+        if 0 <= idx < len(self.MENU_ITEMS):
+            self.selected = idx
+            self._enter_selected()
+
+    def action_menu_up(self) -> None:
+        self.selected = (self.selected - 1) % len(self.MENU_ITEMS)
+
+    def action_menu_down(self) -> None:
+        self.selected = (self.selected + 1) % len(self.MENU_ITEMS)
+
+    def action_menu_enter(self) -> None:
+        self._enter_selected()
+
+    def _enter_selected(self) -> None:
+        mode, _, _ = self.MENU_ITEMS[self.selected]
+        self._app_ref.action_mode(mode)
 
 
 def main() -> None:
