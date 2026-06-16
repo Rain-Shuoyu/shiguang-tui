@@ -310,6 +310,8 @@ class ShiGuangApp(App):
             ev = self._find_edit_view()
             if ev:
                 ev.action_cursor_up()
+        elif self.current_mode == "stats":
+            self._scroll_stats("up")
 
     def action_arrow_down(self) -> None:
         if self.current_mode == "home":
@@ -322,6 +324,25 @@ class ShiGuangApp(App):
             ev = self._find_edit_view()
             if ev:
                 ev.action_cursor_down()
+        elif self.current_mode == "stats":
+            self._scroll_stats("down")
+
+    def _scroll_stats(self, direction: str) -> None:
+        """Scroll the stats VerticalScroll widget in 'up' / 'down' direction.
+
+        Stats mode wraps the report in a VerticalScroll (see render_mode),
+        but no widget in the stats view is focusable by default. So the
+        App's arrow bindings must scroll the scroll container directly,
+        not rely on focused-widget routing.
+        """
+        try:
+            vs = self.query_one("#main-area VerticalScroll")
+        except Exception:
+            return
+        if direction == "up":
+            vs.scroll_up()
+        else:
+            vs.scroll_down()
 
     def action_arrow_left(self) -> None:
         if self.current_mode == "browse":
@@ -355,19 +376,38 @@ class ShiGuangApp(App):
                 ev.action_focus_editor()
 
     def action_arrow_pageup(self) -> None:
-        # Only meaningful in browse preview (where App BINDINGS are
-        # filtered and TextArea handles PageUp natively); this branch
-        # is essentially a no-op since TextArea owns the key.
-        return
+        # In stats mode, page through the report.
+        if self.current_mode == "stats":
+            try:
+                self.query_one("#main-area VerticalScroll").scroll_page_up()
+            except Exception:
+                pass
+            return
+        # In other modes TextArea/browse own the key — no-op.
 
     def action_arrow_pagedown(self) -> None:
-        return
+        if self.current_mode == "stats":
+            try:
+                self.query_one("#main-area VerticalScroll").scroll_page_down()
+            except Exception:
+                pass
+            return
 
     def action_arrow_home(self) -> None:
-        return
+        if self.current_mode == "stats":
+            try:
+                self.query_one("#main-area VerticalScroll").scroll_home()
+            except Exception:
+                pass
+            return
 
     def action_arrow_end(self) -> None:
-        return
+        if self.current_mode == "stats":
+            try:
+                self.query_one("#main-area VerticalScroll").scroll_end()
+            except Exception:
+                pass
+            return
 
     # ── 顶部 status bar ──────────────────────────────────────
 
