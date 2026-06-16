@@ -593,7 +593,7 @@ class HelpScreen(Screen):
         return (
             f"[bold {AMBER}]{STAR} 拾光 · 帮助[/]\n\n"
             f"[bold {AMBER_SOFT}]4 个模式[/]  [dim](按数字键切换)[/]\n\n"
-            f"  [bold]0[/] 首页   [dim]—[/]  [reverse] [black on {AMBER}] 默认视图 [/]  概览 + 最近 5 篇 + 快捷操作\n"
+            f"  [bold]0[/] 首页   [dim]—[/]  [bold {AMBER}]默认视图[/]  概览 + 最近 5 篇 + 快捷操作\n"
             f"  [bold]1[/] 编辑   [dim]—[/]  列表 + 新建 + 编辑（TextArea 编辑器）\n"
             f"  [bold]2[/] 记录   [dim]—[/]  全部日记浏览 + 搜索\n"
             f"  [bold]3[/] 报表   [dim]—[/]  数据统计 + 趋势 + Tag 频率 + 词云\n\n"
@@ -862,9 +862,10 @@ class BrowseView(Container):
                 e = payload  # type: ignore[assignment]
                 is_selected = (self.focus_region == "list" and flat_idx == self.cursor)
                 if is_selected:
-                    out.append(f"  [reverse] [bold {AMBER}]▸ {self._entry_label(e).strip()}[/]")
+                    # Bright amber text + ▸ cursor (no reverse block).
+                    out.append(f"  [bold {AMBER}]▸  {e.date.strftime('%m-%d')}  {e.title or '无标题'}[/]")
                 else:
-                    out.append(f"  {self._entry_label(e)}")
+                    out.append(f"    {self._entry_label(e)}")
                 flat_idx += 1
         list_widget.update("\n".join(out))
 
