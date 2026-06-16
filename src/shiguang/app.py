@@ -28,6 +28,7 @@ from .frontmatter import Frontmatter
 from .markup import md_to_markup
 from . import stats as stats_mod
 from .logo import render_home_header
+from .edit_view import EditView
 
 
 # ── 视觉常量 ──────────────────────────────────────────────
@@ -121,21 +122,27 @@ class ShiGuangApp(App):
         Binding("1", "menu_pick(0)", "1 数据面板", show=False),
         Binding("2", "menu_pick(1)", "2 创作笔记", show=False),
         Binding("3", "menu_pick(2)", "3 洞察笔记", show=False),
-        # Arrow / vim keys: routed by current mode (home menu or
-        # browse navigation). Action handlers check the mode.
-        Binding("up",   "arrow_up",   show=False),
-        Binding("down", "arrow_down", show=False),
-        Binding("left",  "arrow_left",  show=False),
-        Binding("right", "arrow_right", show=False),
-        Binding("j", "arrow_down", show=False),
-        Binding("k", "arrow_up",   show=False),
-        Binding("enter", "arrow_enter", show=False),
+        # Arrow / vim keys — all priority=True so they fire even
+        # when the TextArea is focused (TextArea consumes arrows for
+        # caret movement by default; we trade that for focus
+        # switching in edit mode). Use Home/End/Ctrl+arrows in editor.
+        Binding("up",   "arrow_up",   show=False, priority=True),
+        Binding("down", "arrow_down", show=False, priority=True),
+        Binding("left",  "arrow_left",  show=False, priority=True),
+        Binding("right", "arrow_right", show=False, priority=True),
+        Binding("j", "arrow_down", show=False, priority=True),
+        Binding("k", "arrow_up",   show=False, priority=True),
+        Binding("enter", "arrow_enter", show=False, priority=True),
         Binding("pageup",   "arrow_pageup",   show=False),
         Binding("pagedown", "arrow_pagedown", show=False),
         Binding("home", "arrow_home", show=False),
         Binding("end",  "arrow_end",  show=False),
-        Binding("escape", "go_home_or_back", show=False),
-        Binding("c", "change_folder", show=False),
+        Binding("escape", "go_home_or_back", show=False, priority=True),
+        Binding("c", "change_folder", show=False, priority=True),
+        Binding("ctrl+s", "save", show=False, priority=True),
+        # n/d — only meaningful in edit mode; handlers check current_mode.
+        Binding("n", "new_entry", show=False, priority=True),
+        Binding("d", "delete_entry", show=False, priority=True),
         Binding("?", "help", "? 帮助"),
         Binding("q", "quit", "q 退出", show=False),
     ]
@@ -159,6 +166,33 @@ class ShiGuangApp(App):
     def action_change_folder(self) -> None:
         """`c` — open the folder-change modal from any mode."""
         self.push_screen(ChangeFolderScreen(self))
+
+    def _find_edit_view(self) -> Optional["EditView"]:
+        try:
+            return self.query_one(EditView)
+        except Exception:
+            return None
+
+    def action_save(self) -> None:
+        """Ctrl+S — save the current entry (only in edit mode)."""
+        if self.current_mode == "edit":
+            ev = self._find_edit_view()
+            if ev:
+                ev.action_save()
+
+    def action_new_entry(self) -> None:
+        """`n` — create today's entry (only in edit mode, list focus)."""
+        if self.current_mode == "edit":
+            ev = self._find_edit_view()
+            if ev:
+                ev.action_new_entry()
+
+    def action_delete_entry(self) -> None:
+        """`d` — start the two-step delete (only in edit mode, list focus)."""
+        if self.current_mode == "edit":
+            ev = self._find_edit_view()
+            if ev:
+                ev.action_delete_entry()
 
     MY_MODES = ["home", "edit", "browse", "stats"]
     MODE_LABELS = {
@@ -270,6 +304,10 @@ class ShiGuangApp(App):
             bv = self._find_browse_view()
             if bv:
                 bv.action_browse_up()
+        elif self.current_mode == "edit":
+            ev = self._find_edit_view()
+            if ev:
+                ev.action_browse_up()
 
     def action_arrow_down(self) -> None:
         if self.current_mode == "home":
@@ -278,18 +316,30 @@ class ShiGuangApp(App):
             bv = self._find_browse_view()
             if bv:
                 bv.action_browse_down()
+        elif self.current_mode == "edit":
+            ev = self._find_edit_view()
+            if ev:
+                ev.action_browse_down()
 
     def action_arrow_left(self) -> None:
         if self.current_mode == "browse":
             bv = self._find_browse_view()
             if bv:
                 bv.action_browse_left()
+        elif self.current_mode == "edit":
+            ev = self._find_edit_view()
+            if ev:
+                ev.action_browse_left()
 
     def action_arrow_right(self) -> None:
         if self.current_mode == "browse":
             bv = self._find_browse_view()
             if bv:
                 bv.action_browse_right()
+        elif self.current_mode == "edit":
+            ev = self._find_edit_view()
+            if ev:
+                ev.action_browse_right()
 
     def action_arrow_enter(self) -> None:
         if self.current_mode == "home":
@@ -298,6 +348,10 @@ class ShiGuangApp(App):
             bv = self._find_browse_view()
             if bv:
                 bv.action_browse_enter()
+        elif self.current_mode == "edit":
+            ev = self._find_edit_view()
+            if ev:
+                ev.action_browse_enter()
 
     def action_arrow_pageup(self) -> None:
         if self.current_mode == "browse":
@@ -359,6 +413,10 @@ class ShiGuangApp(App):
             # not the generic Static-content pipeline.
             self.refresh_entries()
             main.mount(BrowseView(self))
+        elif self.current_mode == "edit":
+            # Edit mode: list + TextArea, keyboard-native.
+            self.refresh_entries()
+            main.mount(EditView(self))
         else:
             scroll = VerticalScroll()
             main.mount(scroll)
@@ -386,8 +444,12 @@ class ShiGuangApp(App):
     # ── 1 编辑 ──────────────────────────────────────
 
     def render_edit(self, target: Static) -> None:
-        self.refresh_entries()
-        target.update(self._edit_list_view())
+        # Edit mode is rendered by EditView widget (mounted directly
+        # in render_mode). This is a no-op fallback.
+        target.update(
+            f"[bold {AMBER}]{STAR} 创作笔记[/]\n\n"
+            f"[dim]请按 2 切到创作笔记 tab。[/]"
+        )
 
     def _edit_list_view(self) -> str:
         """Render the edit-mode list."""
