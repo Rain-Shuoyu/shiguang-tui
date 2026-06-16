@@ -1207,9 +1207,11 @@ class HomeView(Container):
             )
             # 3 menu lines, with cursor (▸) on the selected one
             yield Static(self._render_menu(), id="menu")
-            # Footer hint
+            # Footer path (only the diary folder, no key hint —
+            # keep the home screen clean; the top bar already
+            # shows the folder and the Footer widget lists ? q).
             yield Static(
-                f"[dim]  {self._app_ref.folder}  ·  1-3 直接选 · ↑↓ 移动 · Enter 进入 · ? 帮助 · q 退出[/]",
+                f"[dim]  {self._app_ref.folder}[/]",
                 id="footer-hint"
             )
 
