@@ -18,16 +18,16 @@ pipx install shiguang
 
 ```bash
 # 1. 初始化日记目录（默认 ~/Documents/Journal）
-shi --init
+glow --init
 
 # 2. 启动 TUI
-shi
+glow
 ```
 
 或者直接指定目录：
 
 ```bash
-shi --folder /path/to/diary
+glow --folder /path/to/diary
 ```
 
 ## 7 个模式
@@ -64,7 +64,7 @@ v0.1 的 TUI **不暴露配置 UI**——直接编辑 JSON 即可：
 }
 ```
 
-v0.2 会加 `shi config` 交互式配置。
+v0.2 会加 `glow config` 交互式配置。
 
 ## v0.1 不做的
 

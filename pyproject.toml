@@ -18,8 +18,7 @@ dependencies = [
 ]
 
 [project.scripts]
-shiguang = "shiguang.__main__:main"
-shi = "shiguang.__main__:main"
+glow = "shiguang.__main__:main"
 
 [project.urls]
 Homepage = "https://github.com/Rain-Shuoyu/AfterGlow-AI-Powered-Reflective-Journal-Manager"

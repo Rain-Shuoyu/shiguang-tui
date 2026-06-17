@@ -1,4 +1,4 @@
-"""Entry point: `python -m shiguang` or `shiguang` / `shi` command."""
+"""Entry point: `python -m shiguang` or `glow` command."""
 from __future__ import annotations
 
 import argparse
@@ -7,7 +7,7 @@ import sys
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        prog="shiguang",
+        prog="glow",
         description="拾光 · AfterGlow — TUI reflective journal",
     )
     parser.add_argument(
