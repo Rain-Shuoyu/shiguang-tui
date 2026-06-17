@@ -30,6 +30,9 @@ from . import stats as stats_mod
 from .logo import render_home_header
 from .edit_view import EditView
 
+import re
+import unicodedata
+
 
 # ── 视觉常量 ──────────────────────────────────────────────
 
@@ -42,6 +45,46 @@ INK = "#1A1A1A"
 STAR = "✦"
 ARROW = "›"
 DOT = "·"
+
+# 8-step unicode block characters for high-resolution bar charts.
+# Index 0 = 1/8 cell, index 7 = full 8/8 cell.
+BAR_FRACTIONS = "▏▎▍▌▋▊▉█"
+
+# Rich markup tag pattern (e.g. "[bold #E8A87C]" or "[/]") — has no visual
+# width but is interleaved with text. We strip it before measuring.
+_TAG_RE = re.compile(r"\[/?[^\]]*\]")
+
+
+def visual_width(s: str) -> int:
+    """Visual cell width of a string, treating CJK chars as 2 cells.
+
+    Strips rich markup tags first since they render to zero cells.
+    """
+    s = _TAG_RE.sub("", s)
+    w = 0
+    for ch in s:
+        if unicodedata.east_asian_width(ch) in ("F", "W"):
+            w += 2
+        else:
+            w += 1
+    return w
+
+
+def bar(value: int, max_value: int, width: int = 20) -> str:
+    """Render a horizontal bar of `width` cells with 1/8 precision.
+
+    Returns `width` chars: a mix of full blocks, a single fraction block
+    (▏▎▍▌▋▊▉█), and trailing spaces.
+    """
+    if max_value <= 0 or value <= 0:
+        return " " * width
+    total = round(value * width * 8 / max_value)
+    total = max(0, min(total, width * 8))
+    full = total // 8
+    rem = total % 8
+    if rem == 0:
+        return "█" * full + " " * (width - full)
+    return "█" * full + BAR_FRACTIONS[rem - 1] + " " * (width - full - 1)
 
 
 # ── 主 App ──────────────────────────────────────────────
@@ -530,117 +573,169 @@ class ShiGuangApp(App):
         report = stats_mod.compute(self.entries)
         lines: list[str] = []
 
-        lines.append(f"[bold {AMBER}]{STAR} 数据报表 · {report.total_entries} 篇[/]")
-        lines.append(f"[dim]{self.folder}[/]")
+        # ── Title block
+        # Big amber title, then a one-line subtitle with the headline metrics,
+        # then the folder path. Visual hierarchy: title > subtitle > path.
+        lines.append(f"  [bold {AMBER}]{STAR}  数据报表[/]")
+        subtitle_bits = [
+            f"[{AMBER}]{report.total_entries} 篇[/]",
+            f"[{AMBER}]{report.total_words:,} 字[/]",
+        ]
+        if report.date_range:
+            days = (report.date_range[1] - report.date_range[0]).days + 1
+            subtitle_bits.append(f"[{AMBER}]{days} 天[/]")
+        lines.append("     " + " [dim]·[/] ".join(subtitle_bits))
+        lines.append(f"     [dim]{self.folder}[/]")
         lines.append("")
 
         if not report.total_entries:
-            lines.append(f"  [dim]还没有日记，没有数据可统计。[/]")
+            lines.append("  [dim]还没有日记，没有数据可统计。[/]")
             target.update("\n".join(lines))
             return
 
         # ── 概览
-        lines.append(f"  [dim]──────[/]  [dim]概览[/]")
+        lines.append(self._section_header("概览"))
         lines.append("")
         if report.date_range:
-            lines.append(f"    日期范围   [{AMBER}]{report.date_range[0]}[/] → [{AMBER}]{report.date_range[1]}[/]")
-        lines.append(f"    总字数     [{AMBER}]{report.total_words:,}[/]")
-        lines.append(f"    总字符     [{AMBER}]{report.total_characters:,}[/]")
-        lines.append(f"    平均字数   [{AMBER}]{report.average_words_per_entry:.0f}[/] 字/篇")
-        lines.append(f"    写作 streak  [bold {AMBER}]{report.current_streak_days}[/] 天 (最长 {report.longest_streak_days} 天)")
+            lines.append("     " + self._stat_row(
+                "日期范围", f"{report.date_range[0]} → {report.date_range[1]}"))
+        lines.append("     " + self._stat_row("总字数", f"{report.total_words:,}"))
+        lines.append("     " + self._stat_row("总字符", f"{report.total_characters:,}"))
+        lines.append("     " + self._stat_row("平均字数", f"{report.average_words_per_entry:.0f} 字/篇"))
+        lines.append("     " + self._stat_row(
+            "Streak", f"{report.current_streak_days} 天  (最长 {report.longest_streak_days} 天)"))
         lines.append("")
 
         # ── 心情分布
         if report.mood_distribution:
-            lines.append(f"  [dim]──────[/]  [dim]心情分布 (1=最差, 5=最好)[/]")
+            lines.append(self._section_header("心情分布", sub="(1=最差, 5=最好)"))
             lines.append("")
             lines.append(self._bar_chart_mood(report.mood_distribution))
             lines.append("")
 
-        # ── 月度字数趋势
+        # ── 月度字数
         if report.monthly_trend:
-            lines.append(f"  [dim]──────[/]  [dim]月度字数 (最近 6 个月)[/]")
+            lines.append(self._section_header("月度字数", sub="(最近 6 个月)"))
             lines.append("")
             lines.append(self._bar_chart_monthly(report.monthly_trend))
             lines.append("")
 
         # ── Tag 频率 Top 10
         if report.top_tags:
-            lines.append(f"  [dim]──────[/]  [dim]Tag 频率 Top 10[/]")
+            lines.append(self._section_header("Tag 频率 Top 10"))
             lines.append("")
-            max_count = report.top_tags[0].count
             for tc in report.top_tags[:10]:
-                bar_width = (tc.count * 16) // max(max_count, 1) if max_count else 0
-                bar = "█" * bar_width
-                lines.append(f"    [{AMBER}]#{tc.tag:<10}[/]  [{AMBER_SOFT}]{bar}[/]  [dim]{tc.count}[/]")
+                tag_bar = bar(tc.count, report.top_tags[0].count, width=20)
+                lines.append(
+                    f"     [{AMBER}]#{tc.tag:<8}[/]  "
+                    f"[{AMBER_SOFT}]{tag_bar}[/]  "
+                    f"[dim]{tc.count}[/]"
+                )
             lines.append("")
 
-        # ── Word cloud
+        # ── 词云
         if report.word_cloud:
-            lines.append(f"  [dim]──────[/]  [dim]词云 (Top 30 · CJK + Latin)[/]")
+            lines.append(self._section_header("词云", sub="(Top 30 · CJK + Latin)"))
             lines.append("")
             lines.append(self._word_cloud_render(report.word_cloud))
-            lines.append("")
 
-        lines.append(f"  [dim]────────  0 首页 · 1 编辑 · 2 记录 · 3 报表 · ? 帮助[/]")
         target.update("\n".join(lines))
+
+    @staticmethod
+    def _section_header(title: str, sub: str = "") -> str:
+        """Render a section heading: '▎ Title' + '─────' rule on the next line.
+
+        Returns the single string to append (caller adds its own blank line
+        below for breathing room).
+        """
+        if sub:
+            return f"  [bold {AMBER}]▎ {title}[/]  [dim]{sub}[/]\n  [dim]─────[/]"
+        return f"  [bold {AMBER}]▎ {title}[/]\n  [dim]─────[/]"
+
+    @staticmethod
+    def _stat_row(label: str, value: str) -> str:
+        """Format a single overview row: label left-padded to 8 visual cells,
+        then 2-cell gap, then value.
+
+        Handles CJK labels (each CJK char = 2 visual cells).
+        """
+        lw = visual_width(label)
+        pad = max(2, 8 - lw)  # 2..8 cells of padding
+        return f"{label}{' ' * pad}  {value}"
 
     # ── Bar chart helpers ──────────────────────────────────────
 
     def _bar_chart_mood(self, buckets) -> str:
-        """Render a horizontal bar chart for mood distribution."""
+        """Render a horizontal bar chart for mood distribution.
+
+        5 fixed rows (1..5). 8-step unicode bars over a 20-cell track.
+        """
         max_count = max(b.count for b in buckets) if buckets else 1
-        lines: list[str] = []
-        # Ensure all 1..5 are represented
         by_score = {b.score: b.count for b in buckets}
+        lines: list[str] = []
         for score in range(1, 6):
             count = by_score.get(score, 0)
-            bar_width = (count * 20) // max(max_count, 1) if max_count else 0
-            bar = "█" * bar_width
+            b = bar(count, max_count, width=20)
             label = ["很差", "差", "一般", "好", "很好"][score - 1]
-            lines.append(f"    [{AMBER}]{score} {label:<4}[/]  [{AMBER_SOFT}]{bar:<20}[/]  [dim]{count}[/]")
+            lines.append(
+                f"     [{AMBER}]{score} {label:<4}[/]  "
+                f"[{AMBER_SOFT}]{b}[/]  [dim]{count}[/]"
+            )
         return "\n".join(lines)
 
     def _bar_chart_monthly(self, points) -> str:
-        """Render monthly word-count trend."""
+        """Render monthly word-count trend.
+
+        Bar width 20 (8-step precision). The right-side stat column is
+        right-padded to a stable width so the numbers line up.
+        """
         max_words = max(p.word_count for p in points) if points else 1
         lines: list[str] = []
         for p in points:
-            bar_width = (p.word_count * 24) // max(max_words, 1) if max_words else 0
-            bar = "█" * bar_width
-            # show count
-            lines.append(f"    [{AMBER}]{p.label:<6}[/]  [{AMBER_SOFT}]{bar:<24}[/]  [dim]{p.word_count:>5,} 字 · {p.entry_count} 篇[/]")
+            b = bar(p.word_count, max_words, width=20)
+            lines.append(
+                f"     [{AMBER}]{p.label:<6}[/]  "
+                f"[{AMBER_SOFT}]{b}[/]  "
+                f"[dim]{p.word_count:>5,} 字  {DOT}  {p.entry_count} 篇[/]"
+            )
         return "\n".join(lines)
 
     def _word_cloud_render(self, words: list[tuple[str, int]]) -> str:
-        """Render a small word cloud as colored text with varying sizes."""
+        """Render the word cloud as a wrapped horizontal flow.
+
+        Words are styled by frequency (4 bands: bold amber / amber /
+        amber-soft / dim) and laid out as a single flow separated by
+        double spaces, wrapped to ~110 visual cells per line.
+        """
         if not words:
             return ""
-        # Simple two-band sizing: top 10 are "big" (bold amber), rest "small" (dim)
-        out: list[str] = []
-        # Render in 3 columns × ~10 rows for a compact grid
-        # Group by max count to size them
         max_count = words[0][1]
-        # Build 3-column grid
-        col_size = (len(words) + 2) // 3
-        cols = [words[i:i + col_size] for i in range(0, len(words), col_size)]
-        rows = max(len(c) for c in cols)
-        for row in range(rows):
-            row_pieces = []
-            for c in cols:
-                if row < len(c):
-                    word, count = c[row]
-                    # Size: bigger words (count > max/3) get amber bold
-                    if count >= max_count * 0.5:
-                        style = f"[bold {AMBER}]"
-                    elif count >= max_count * 0.25:
-                        style = f"[{AMBER}]"
-                    else:
-                        style = f"[{AMBER_SOFT}]"
-                    row_pieces.append(f"{style}{word}[/]")
-                else:
-                    row_pieces.append("     ")
-            out.append("    " + "  ".join(f"{p:<14}" for p in row_pieces))
+        styled: list[str] = []
+        for word, count in words:
+            if count >= max_count * 0.5:
+                style = f"[bold {AMBER}]"
+            elif count >= max_count * 0.25:
+                style = f"[{AMBER}]"
+            elif count >= max_count * 0.1:
+                style = f"[{AMBER_SOFT}]"
+            else:
+                style = f"[dim]"
+            styled.append(f"{style}{word}[/]")
+
+        # Wrap the flow to ~110 visual cells per line. We measure
+        # rendered (tag-stripped) width; tags themselves are zero-width.
+        sep = "  "
+        out: list[str] = []
+        cur = ""
+        for piece in styled:
+            candidate = (cur + sep + piece) if cur else piece
+            if visual_width(candidate) > 110 and cur:
+                out.append("     " + cur)
+                cur = piece
+            else:
+                cur = candidate
+        if cur:
+            out.append("     " + cur)
         return "\n".join(out)
 
 

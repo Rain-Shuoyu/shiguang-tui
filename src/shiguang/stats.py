@@ -186,16 +186,29 @@ _CJK_RE = re.compile(
     r"|[A-Za-z0-9]+"           # Latin words
 )
 _STOPWORDS = {
-    # Chinese stopwords (very short list — we keep the rest)
-    "的", "了", "是", "在", "我", "你", "他", "她", "它", "我们",
-    "你们", "他们", "这个", "那个", "什么", "怎么", "为什么", "没有",
-    "有", "和", "也", "都", "就", "不", "要", "会", "可以", "但是",
+    # Chinese particles, pronouns, and time/place adverbs
+    "的", "了", "是", "在", "我", "你", "他", "她", "它", "们",
+    "这", "那", "哪", "什么", "怎么", "为什么", "没有",
+    "有", "和", "也", "都", "就", "不", "要", "会", "可以", "但",
+    "上", "下", "中", "里", "外", "前", "后", "左", "右", "内",
+    "来", "去", "走", "看", "听", "说", "想", "问", "答", "做",
+    "给", "拿", "放", "开", "关", "出", "入", "把", "被", "让",
+    "个", "些", "多", "少", "大", "小", "新", "老", "高", "长",
+    "很", "太", "更", "最", "比", "从", "向", "对", "以", "及",
+    "或", "还", "只", "才", "已", "没", "别", "再", "又", "才",
+    "再", "也", "再", "怎", "哦", "嗯", "啊", "吧", "呀", "哎",
+    "现在", "以前", "之后", "以后", "然后", "但是", "因为",
+    "所以", "如果", "虽然", "这样", "那样", "这里", "那里",
+    "觉得", "应该", "已经", "知道", "可以", "可能", "也许",
     # English stopwords
     "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
     "i", "you", "he", "she", "it", "we", "they", "this", "that", "what",
     "how", "why", "have", "has", "had", "do", "does", "did", "and", "or",
     "but", "if", "then", "so", "of", "in", "on", "at", "to", "for",
 }
+
+# Pure 4-digit numbers are dates/years and clutter the word cloud.
+_YEAR_RE = re.compile(r"^\d{4}$")
 
 
 def _word_cloud(entries: list[Entry], top_n: int) -> list[tuple[str, int]]:
@@ -208,6 +221,7 @@ def _word_cloud(entries: list[Entry], top_n: int) -> list[tuple[str, int]]:
       - Drop pure single-char Latin words
       - Keep runs of length 2-4 for CJK (idiom-like)
       - Keep runs of length >= 3 for Latin
+      - Drop 4-digit year-like numbers
       - Rank by frequency
     """
     counter: Counter = Counter()
@@ -227,6 +241,8 @@ def _word_cloud(entries: list[Entry], top_n: int) -> list[tuple[str, int]]:
                 if len(token) < 3:
                     continue
                 if token.lower() in _STOPWORDS:
+                    continue
+                if _YEAR_RE.match(token):
                     continue
             counter[token] += 1
 
