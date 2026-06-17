@@ -7,9 +7,9 @@
 ## 安装
 
 ```bash
-pip install --user shiguang
+pip install --user afterglow-tui
 # 或者
-pipx install shiguang
+pipx install afterglow-tui
 ```
 
 需要 Python 3.9+。
