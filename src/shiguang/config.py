@@ -77,23 +77,6 @@ class PersistentState(BaseModel):
     diary_folder: Optional[str] = None
     llm: LLMSettings = Field(default_factory=LLMSettings)
 
-    # Daily practice
-    daily_practice_streak: int = 0
-    daily_practice_longest: int = 0
-    daily_practice_last_done_date: Optional[str] = None  # ISO date
-    daily_practice_last_done_prompt_id: Optional[int] = None
-
-    # Anniversary
-    anniversary_last_shown_date: Optional[str] = None
-    anniversary_user_disabled: bool = False
-    anniversary_dismissed_dates: list[str] = Field(default_factory=list)
-
-    # Rescue
-    rescue_last_shown_date: Optional[str] = None
-    rescue_user_disabled: bool = False
-    rescue_dismissed_dates: list[str] = Field(default_factory=list)
-    rescue_permanent_dismiss_count: int = 0
-
 
 def load_state() -> PersistentState:
     path = state_file()

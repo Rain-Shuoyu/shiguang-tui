@@ -1,33 +1,34 @@
 # Python
 __pycache__/
 *.py[cod]
-*.egg-info/
-*.egg
+*$py.class
 *.so
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
 
-# Build / dist
+# Build / distribution
 build/
 dist/
-*.dmg
-*.app
+*.egg-info/
+*.egg
 
-# Editor
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# macOS Finder junk
+.DS_Store
+
+# IDE
 .vscode/
 .idea/
 *.swp
-.DS_Store
+*~
 
-# venvs
-venv/
-.venv/
-env/
-
-# Test coverage
+# Test artifacts
 .coverage
+.pytest_cache/
 htmlcov/
 
-# State / local-only
-state.local.json
+# Editor backups
+*.bak
+*.orig

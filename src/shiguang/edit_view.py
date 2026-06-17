@@ -53,13 +53,7 @@ from textual.widgets import Static, TextArea
 from . import frontmatter as fm
 from .diary import Entry, write_entry, available_filename
 from . import __version__
-
-
-# Reuse the project's amber palette
-AMBER = "#E8A87C"
-AMBER_DEEP = "#C97B4F"
-AMBER_SOFT = "#F5C7A0"
-STAR = "✦"
+from .theme import AMBER, AMBER_DEEP, AMBER_SOFT, STAR
 
 
 # Template for a brand-new entry. The user edits this in the TextArea.
